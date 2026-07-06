@@ -1,3 +1,24 @@
+[submodule "third_party/dqc"]
+	path = third_party/dqc
+	url = https://github.com/ColinQiyangLi/dqc.git
+[submodule "third_party/FlowCPS"]
+	path = third_party/FlowCPS
+	url = https://github.com/IamCreateAI/FlowCPS.git
+[submodule "third_party/flow_grpo"]
+	path = third_party/flow_grpo
+	url = https://github.com/yifan123/flow_grpo.git
+[submodule "third_party/MAC"]
+	path = third_party/MAC
+	url = https://github.com/kwanyoungpark/MAC.git
+[submodule "third_party/qam"]
+	path = third_party/qam
+	url = https://github.com/ColinQiyangLi/qam.git
+[submodule "third_party/qc"]
+	path = third_party/qc
+	url = https://github.com/ColinQiyangLi/qc.git
+[submodule "third_party/r3m"]
+	path = third_party/r3m
+	url = https://github.com/facebookresearch/r3m.git
 [submodule "third_party/rl100-state"]
 	path = third_party/rl100-state
 	url = git@github.com:Lei-Kun/rl100-state.git
