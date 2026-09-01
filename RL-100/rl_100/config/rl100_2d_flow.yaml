@@ -70,7 +70,7 @@ wo_dataset: False
 # 添加encoder选择参数（移到全局）
 encoder_type: "resnet"  # 可选: "resnet", "vit"
 use_wandb: True
-chunk_as_single_action: True
+chunk_as_single_action: False
 chunk_adv_clip: null
 offline_chunk_ratio_mode: scalar
 offline_chunk_adv_mode: scalar_iql

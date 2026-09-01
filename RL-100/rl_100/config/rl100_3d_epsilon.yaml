@@ -51,7 +51,7 @@ dynamics_type: 'diffusion' # 'diffusion', 'mlp'
 predict_r: False
 offline_cp_timestamp: null
 offline_cp_timestep: null
-chunk_as_single_action: True
+chunk_as_single_action: False
 bppo_chunk_level_ratio: True
 chunk_adv_clip: null
 offline_chunk_ratio_mode: scalar
