@@ -33,13 +33,24 @@ class PushTDataset(BaseDataset):
             task_name=None,
             scale_strategy=None,
             pre_image_norm=False,   
-            use_img=False
+            use_img=False,
+            sequence_stride=1,
+            derive_next_action=False,
             ):
         super().__init__()
         self.task_name = task_name
         self.use_img = use_img
         self.replay_buffer = ReplayBuffer.copy_from_path(
             zarr_path, keys=['state', 'action', 'point_cloud', 'next_state', 'next_action', 'next_point_cloud', 'reward', 'done', 'timeout', 'return'])
+        if derive_next_action:
+            action = self.replay_buffer['action']
+            next_action = action.copy()
+            episode_start = 0
+            for episode_end in self.replay_buffer.episode_ends:
+                next_action[episode_start:episode_end - 1] = action[episode_start + 1:episode_end]
+                next_action[episode_end - 1] = action[episode_end - 1]
+                episode_start = episode_end
+            self.replay_buffer.root['data']['next_action'] = next_action
         # construct scaled reward and return
         # import pdb; pdb.set_trace()
         if scale_strategy == 'dynamic':
@@ -76,11 +87,13 @@ class PushTDataset(BaseDataset):
             sequence_length=horizon,
             pad_before=pad_before, 
             pad_after=pad_after,
-            episode_mask=train_mask)
+            episode_mask=train_mask,
+            sequence_stride=sequence_stride)
         self.train_mask = train_mask
         self.horizon = horizon
         self.pad_before = pad_before
         self.pad_after = pad_after
+        self.sequence_stride = sequence_stride
     def reward_scaling(self, scaling_strategy = 'dynamic', gamma = 0.99):
         if scaling_strategy == 'dynamic':
             print('scaling reward dynamically')
@@ -102,7 +115,8 @@ class PushTDataset(BaseDataset):
             sequence_length=self.horizon,
             pad_before=self.pad_before, 
             pad_after=self.pad_after,
-            episode_mask=~self.train_mask
+            episode_mask=~self.train_mask,
+            sequence_stride=self.sequence_stride,
             )
         val_set.train_mask = ~self.train_mask
         return val_set
@@ -189,4 +203,3 @@ class PushTDataset(BaseDataset):
         data = self._sample_to_data(sample)
         torch_data = dict_apply(data, torch.from_numpy)
         return torch_data
-

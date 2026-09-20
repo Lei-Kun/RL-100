@@ -1,0 +1,85 @@
+name: peg_2048
+
+task_name: peg_2048
+
+shape_meta: &shape_meta
+  obs:
+    point_cloud:
+      shape: [2048, 3]
+      type: point_cloud
+    agent_pos:
+      shape: [7]
+      type: low_dim
+  action:
+    shape: [8]
+
+env_runner:
+  _target_: rl_100.env_runner.peg_runner.PegRunner
+  eval_episodes: 1
+  max_steps: 500
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  fps: 10
+  task_name: peg_2048
+  render_size: 84
+  use_point_crop: ${policy.use_point_crop}
+  env_num: 1
+  fake_env: True
+  num_points: 2048
+  state_shape: 7
+  gamma: ${gamma}
+  smooth_penalty: 0.001
+  success_reward: 2.0
+  failure_reward: -1.0
+
+norm_dataset:
+  _target_: rl_100.dataset.pusht_dataset.PushTDataset
+  zarr_path: /data/hdd2/xarm_teleop/data/data_peg_2048.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.0
+  max_train_episodes: 9000000
+  pre_image_norm: False
+  sequence_stride: 1
+  derive_next_action: True
+
+dataset:
+  _target_: rl_100.dataset.pusht_dataset.PushTDataset
+  zarr_path: /data/hdd2/xarm_teleop/data/data_peg_2048.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.0
+  max_train_episodes: 9000000
+  pre_image_norm: False
+  sequence_stride: 1
+  derive_next_action: True
+
+critic_dataset:
+  _target_: rl_100.dataset.pusht_dataset.PushTDataset
+  zarr_path: /data/hdd2/xarm_teleop/data/data_peg_2048.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.0
+  max_train_episodes: 9000000
+  pre_image_norm: False
+  sequence_stride: 16
+  derive_next_action: True
+
+finetune_dataset:
+  _target_: rl_100.dataset.pusht_dataset.PushTDataset
+  zarr_path: /data/hdd2/xarm_teleop/data/data_peg_2048.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.0
+  max_train_episodes: 9000000
+  pre_image_norm: False
+  sequence_stride: 16
+  derive_next_action: True

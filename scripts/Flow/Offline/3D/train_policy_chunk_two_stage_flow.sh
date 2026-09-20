@@ -11,6 +11,9 @@ set -euo pipefail
 
 DEBUG=${DEBUG:-False}
 save_ckpt=${save_ckpt:-True}
+BC_EPOCHS=${BC_EPOCHS:-800}
+BATCH_SIZE=${BATCH_SIZE:-1024}
+VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-${BATCH_SIZE}}
 
 alg_name=${1:?alg_name is required}
 task_name=${2:?task_name is required}
@@ -190,14 +193,14 @@ get_common_params() {
         policy.use_vib=True \
         policy.use_recon=True \
         dynamics_type='mlp' \
-        training.num_epochs=800 \
+        training.num_epochs=${BC_EPOCHS} \
         training.num_critic_epochs=800 \
         dynamics.dynamics_max_epochs=350 \
-        dataloader.batch_size=1024 \
-        val_dataloader.batch_size=1024 \
-        optimizer.lr=2.83e-4 \
-        critic.q_lr=2.83e-4 \
-        critic.v_lr=2.83e-4 \
+        dataloader.batch_size=${BATCH_SIZE} \
+        val_dataloader.batch_size=${VAL_BATCH_SIZE} \
+        optimizer.lr=1.4e-4 \
+        critic.q_lr=1.4e-4 \
+        critic.v_lr=1.4e-4 \
         dynamics.dynamics_lr=5.66e-4 \
         distill_phase=null \
         predict_r=True \

@@ -73,3 +73,5 @@ scripts/train_policy_online_cm_flip.sh
 AGENTS.md
 .claude/
 .vscode/
+RL-100/rl_100/env/*/episodes/
+RL-100/rl_100/env/*/trajectories/

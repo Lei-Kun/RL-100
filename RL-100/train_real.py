@@ -51,6 +51,42 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 _IQLFT_RESTORE_RNG = os.environ.get("IQLFT_RESTORE_RNG_AFTER_IQL", "1") == "1"
 
 
+def _save_online_reward_curves(path, chunk_rewards, episode_returns, episode_successes):
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    figure = Figure(figsize=(10, 8))
+    FigureCanvasAgg(figure)
+    axes = figure.subplots(3, 1)
+
+    axes[0].plot(np.arange(1, len(chunk_rewards) + 1), chunk_rewards)
+    axes[0].set_ylabel('chunk reward')
+
+    episode_x = np.arange(1, len(episode_returns) + 1)
+    return_mean_10 = [
+        np.mean(episode_returns[max(0, i - 9):i + 1])
+        for i in range(len(episode_returns))
+    ]
+    success_mean_10 = [
+        np.mean(episode_successes[max(0, i - 9):i + 1])
+        for i in range(len(episode_successes))
+    ]
+    axes[1].plot(episode_x, episode_returns, label='return')
+    axes[1].plot(episode_x, return_mean_10, label='mean (10)')
+    axes[1].set_ylabel('episode return')
+    axes[1].legend()
+    axes[2].plot(episode_x, episode_successes, label='success')
+    axes[2].plot(episode_x, success_mean_10, label='rate (10)')
+    axes[2].set_ylabel('success')
+    axes[2].set_xlabel('episode')
+    axes[2].set_ylim(-0.05, 1.05)
+    axes[2].legend()
+    for axis in axes:
+        axis.grid(alpha=0.3)
+    figure.tight_layout()
+    figure.savefig(path, dpi=150)
+
+
 def _iqlft_snapshot_rng():
     snap = {
         "torch_cpu": torch.random.get_rng_state().clone(),
@@ -368,6 +404,7 @@ class TrainDP3Workspace:
             write_dict(f, config)
         print('====================================Here==================================')
         # resume training
+        loaded_stage1_checkpoint = False
         if cfg.training.resume:
             lastest_ckpt_path = self.get_stage1_checkpoint_path(tag='latest')
             lastest_cm_ckpt_path = self.get_stage1_checkpoint_path(tag='latest_cm')
@@ -378,9 +415,11 @@ class TrainDP3Workspace:
                 if cfg.distill_phase is not None:
                     self.model.set_target()
                 self.load_checkpoint(path=lastest_cm_ckpt_path)
+                loaded_stage1_checkpoint = True
             elif lastest_ckpt_path.is_file():
                 print(f"Resuming diffusion model from checkpoint {lastest_ckpt_path}")
                 self.load_checkpoint(path=lastest_ckpt_path)
+                loaded_stage1_checkpoint = True
             else:
                 print(f"No checkpoint found at {lastest_ckpt_path}")
         # device transfer
@@ -394,7 +433,15 @@ class TrainDP3Workspace:
         # pdb.set_trace()
         assert isinstance(dataset, BaseDataset), print(f"dataset must be BaseDataset, got {type(dataset)}")
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
-        if (self.cfg.off2off and self.cfg.off2off_no_bc) or self.cfg.use_pre_norm:
+        use_checkpoint_normalizer = bool(
+            cfg.eval
+            and cfg.get('use_checkpoint_normalizer', False)
+            and loaded_stage1_checkpoint
+        )
+        if use_checkpoint_normalizer:
+            normalizer = self.model.normalizer
+            cprint('reuse the normalizer stored in the evaluation checkpoint', 'yellow')
+        elif (self.cfg.off2off and self.cfg.off2off_no_bc) or self.cfg.use_pre_norm:
             norm_dataset = hydra.utils.instantiate(cfg.task.norm_dataset)
             normalizer = norm_dataset.get_normalizer()
             cprint('***********************************reuse the normalizer of pre-dataset***********************************', 'yellow')
@@ -648,7 +695,15 @@ class TrainDP3Workspace:
                 self.global_step += 1
                 self.epoch += 1
                 del step_log
-        
+        if cfg.eval:
+            log_data = self.eval(
+                eval_times=self.cfg.unio4.eval_times,
+                online=False,
+                data_collect=self.cfg.data_collect,
+            )
+            return log_data['test_mean_score']
+
+        log_data = self.eval(eval_times=self.cfg.unio4.eval_times, online=True, traj_path='/', data_collect=self.cfg.data_collect)
         self.offline_best_path = self.get_global_best_dir()
         self.offline_last_path = os.path.join(self.output_dir, 'last')
         # =============================== stage 1-1: end diffusion training ===============================
@@ -1399,6 +1454,9 @@ class TrainDP3Workspace:
         with open(config_path, 'w') as f:
             write_dict(f, config)
 
+        wandb.define_metric('online_reward_step')
+        wandb.define_metric('online_reward/*', step_metric='online_reward_step')
+
         reward_scaler = None
         if self.cfg.ppo.scale_strategy == 'dynamic' or self.cfg.ppo.scale_strategy == 'number':
             critic_dataset = hydra.utils.instantiate(self.cfg.task.critic_dataset)
@@ -1730,6 +1788,10 @@ class TrainDP3Workspace:
         total_mean_return = []
         total_reward_sub = 0
         total_episode_r =  deque(maxlen=10)
+        chunk_reward_history = []
+        episode_return_history = []
+        episode_success_history = []
+        reward_curve_path = os.path.join(online_ft_path, 'online_reward_curves.png')
         episode_reward = 0
         pre_reward = 0  # Track previous reward for None handling in step_online
         time1 = 0
@@ -1741,7 +1803,7 @@ class TrainDP3Workspace:
             obs = env.reset()
 
             # Ask operator to confirm reward label and physical reset (skip before first episode)
-            if total_steps > 0:
+            if total_steps > 0 and not getattr(env_runner, 'handles_keyboard_result', False):
                 print("\nEpisode ended. Was it successful?")
                 user_input = input("Type number for success, letter for failure: ").strip()
                 # Use the last character to avoid interference from stop key
@@ -1759,7 +1821,6 @@ class TrainDP3Workspace:
             if self.cfg.ppo.scale_strategy == 'dynamic':
                 reward_scaler.reset()
             print('episode reward: {}, episode length: {}'.format(episode_reward, episode_steps))
-            total_episode_r.append(episode_reward)
 
             episode_steps = 0
             episode_reward = 0
@@ -1796,14 +1857,17 @@ class TrainDP3Workspace:
                 # Handle None reward (can occur during keyboard input)
                 if reward is None:
                     reward = pre_reward
+                reward = float(reward)
                 episode_reward += reward
                 pre_reward = reward
 
                 # next_obs['image'] = np.transpose(next_obs['image'], (0,2,3,1))
-                if done and episode_steps != self.cfg.task.env_runner.max_steps:
-                    dw = True
-                else:
-                    dw = False
+                is_timeout = bool(
+                    done
+                    and isinstance(info, dict)
+                    and np.asarray(info.get('timeout', False)).any()
+                )
+                dw = bool(done and not is_timeout)
                 # store transition
                 obs_dict = dict_apply(obs_dict,
                                       lambda x: x.detach().to('cpu').numpy())
@@ -1832,6 +1896,32 @@ class TrainDP3Workspace:
                     distill_losses.append(distill_loss)
                 obs = next_obs
                 total_steps += 1
+                chunk_reward_history.append(reward)
+                chunk_success = bool(
+                    isinstance(info, dict)
+                    and np.asarray(info.get('is_success', False)).any()
+                )
+                reward_log = {
+                    'online_reward_step': total_steps,
+                    'online_reward/chunk': reward,
+                    'online_reward/episode_return_running': episode_reward,
+                }
+                if done:
+                    total_episode_r.append(episode_reward)
+                    episode_return_history.append(episode_reward)
+                    episode_success_history.append(float(chunk_success))
+                    reward_log.update({
+                        'online_reward/episode_return': episode_reward,
+                        'online_reward/episode_return_mean_10': float(np.mean(total_episode_r)),
+                        'online_reward/success': float(chunk_success),
+                    })
+                    _save_online_reward_curves(
+                        reward_curve_path,
+                        chunk_reward_history,
+                        episode_return_history,
+                        episode_success_history,
+                    )
+                wandb.log(reward_log)
                 # progress_bar.update(1)
                 total_count_sub += 1 
                 if replay_buffer.count == self.cfg.ppo.batch_size:
@@ -3048,8 +3138,9 @@ class TrainDP3Workspace:
             force_load=online_encoder_path is not None
             ) # 3. load iql
             cprint('3. load iql from {}'.format(self.online_iql_cp_path), 'green')
-        self.unio4._policy.distilled_model.load_state_dict(torch.load(os.path.join(self.online_distilled_cp_path, 'distilled.pth'))) # 4. load distilled model
-        cprint('4. load distilled model from {}'.format(self.online_distilled_cp_path), 'green')
+        if self.cfg.distill_phase == 'online':
+            self.unio4._policy.distilled_model.load_state_dict(torch.load(os.path.join(self.online_distilled_cp_path, 'distilled.pth'))) # 4. load distilled model
+            cprint('4. load distilled model from {}'.format(self.online_distilled_cp_path), 'green')
         lr_a, lr_c = np.loadtxt(self.online_lr_cp_path, dtype=float) # 5. load learning rate
         cprint('5. load learning rate from {}'.format(self.online_lr_cp_path), 'green')
         self.cfg.ppo.lr_a, self.cfg.ppo.lr_c = float(lr_a), float(lr_c)

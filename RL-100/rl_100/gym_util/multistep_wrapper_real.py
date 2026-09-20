@@ -188,6 +188,7 @@ class MultiStepWrapper(gym.Wrapper):
                 # truncation
                 done = True
             dones.append(done)
+            self.done.append(done)
             self._add_info(info)
 
         observation = self._get_obs(self.n_obs_steps)

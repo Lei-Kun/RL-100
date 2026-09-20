@@ -1,0 +1,97 @@
+name: peg
+
+task_name: peg
+
+shape_meta: &shape_meta
+  # acceptable types: rgb, low_dim
+  obs:
+    image:
+      shape: [3, 84, 84]
+      type: rgb
+    point_cloud:
+      shape: [1024, 3]
+      type: point_cloud
+    agent_pos:
+      shape: [7]
+      type: low_dim
+  action:
+    shape: [8]
+
+env_runner:
+  _target_: rl_100.env_runner.peg_runner.PegRunner
+  eval_episodes: 16
+  max_steps: 500
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  fps: 10
+  task_name: peg
+  render_size: 84
+  use_point_crop: ${policy.use_point_crop}
+  env_num: 8
+  fake_env: True
+  state_shape: 7
+  gamma: ${gamma}
+  smooth_penalty: 0.001
+  success_reward: 2.0
+  failure_reward: -1.0
+norm_dataset:
+  _target_: rl_100.dataset.pusht_dataset.PushTDataset
+  zarr_path: /data/hdd2/xarm_teleop/data/data_peg.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.02
+  max_train_episodes: 9000000
+  pre_image_norm: False
+  sequence_stride: 1
+  derive_next_action: True
+dataset:
+  _target_: rl_100.dataset.pusht_dataset.PushTDataset
+  zarr_path: /data/hdd2/xarm_teleop/data/data_peg.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.02
+  max_train_episodes: 9000000
+  pre_image_norm: False
+  sequence_stride: 1
+  derive_next_action: True
+critic_dataset:
+  _target_: rl_100.dataset.pusht_dataset.PushTDataset
+  zarr_path: /data/hdd2/xarm_teleop/data/data_peg.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.00
+  max_train_episodes: 9000000
+  pre_image_norm: False
+  sequence_stride: 1
+  derive_next_action: True
+finetune_dataset:
+  _target_: rl_100.dataset.pusht_dataset.PushTDataset
+  zarr_path: /data/hdd2/xarm_teleop/data/data_peg.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.00
+  max_train_episodes: 9000000
+  pre_image_norm: False
+  sequence_stride: 1
+  derive_next_action: True
+scale_dataset:
+  _target_: rl_100.dataset.pusht_dataset.PushTDataset
+  zarr_path: /data/hdd2/xarm_teleop/data/data_peg.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.00
+  max_train_episodes: 9000000
+  scale_strategy: 'dynamic'
+  pre_image_norm: False
+  sequence_stride: 1
+  derive_next_action: True
