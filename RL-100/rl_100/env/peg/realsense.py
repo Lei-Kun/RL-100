@@ -63,45 +63,72 @@ class RealSense(object):
     def __init__(
         self,
         fps=30,
+        enable_color=False,
+        color_width=640,
+        color_height=480,
         depth_width=320,
         depth_height=240,
-        num_points=2048
+        num_points=2048,
+        device_serial=None,
+        enable_depth=True,
+        color_fps=None,
+        depth_fps=None,
     ):
         import pyrealsense2 as rs
 
+        self.enable_color = bool(enable_color)
+        self.enable_depth = bool(enable_depth)
+        if not self.enable_color and not self.enable_depth:
+            raise ValueError('At least one camera stream must be enabled')
+        color_fps = fps if color_fps is None else color_fps
+        depth_fps = fps if depth_fps is None else depth_fps
         self.depth_width = depth_width
         self.depth_height = depth_height
         self.num_points = num_points
 
         self.pipeline = rs.pipeline()
         self.config = rs.config()
-        self.config.enable_stream(rs.stream.depth, depth_width, depth_height, rs.format.z16, fps)
-        self.align = rs.align(rs.stream.color)
+        if device_serial is not None:
+            self.config.enable_device(device_serial)
+        if self.enable_color:
+            self.config.enable_stream(
+                rs.stream.color, color_width, color_height, rs.format.bgr8, color_fps
+            )
+        if self.enable_depth:
+            self.config.enable_stream(
+                rs.stream.depth, depth_width, depth_height, rs.format.z16, depth_fps
+            )
+        self.align = rs.align(rs.stream.color) if self.enable_color else None
 
     def start(self):
         profile = self.pipeline.start(self.config)
 
         # get intrinsics
         frames = self.pipeline.wait_for_frames()
-        self.depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
-        depth_frame = frames.get_depth_frame()
-        depth_intrinsics = depth_frame.get_profile().as_video_stream_profile().get_intrinsics()
-        self.depth_intrinsics = (depth_intrinsics.fx, depth_intrinsics.fy, depth_intrinsics.ppx, depth_intrinsics.ppy)
+        if self.enable_depth:
+            self.depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
+            depth_frame = frames.get_depth_frame()
+            depth_intrinsics = depth_frame.get_profile().as_video_stream_profile().get_intrinsics()
+            self.depth_intrinsics = (depth_intrinsics.fx, depth_intrinsics.fy, depth_intrinsics.ppx, depth_intrinsics.ppy)
 
     def stop(self):
         self.pipeline.stop()
 
     def get_frame(self, require_pc=False):
+        if require_pc and not self.enable_depth:
+            raise ValueError('Point cloud requires the depth stream')
         while True:
             frames = self.pipeline.wait_for_frames()
 
             timestamp = frames.get_timestamp() / 1000  # ms -> s
-            depth_frame = frames.get_depth_frame()
+            color_frame = frames.get_color_frame() if self.enable_color else None
+            depth_frame = frames.get_depth_frame() if self.enable_depth else None
 
-            if depth_frame:
+            if (not self.enable_color or color_frame) and (not self.enable_depth or depth_frame):
                 break
 
-        depth_image = np.array(depth_frame.get_data())
+        color_image = np.array(color_frame.get_data()) if color_frame else None
+        depth_image = np.array(depth_frame.get_data()) if depth_frame else None
 
         point_cloud = point_cloud_downsample(depth2pc(
             depth_image * self.depth_scale,
@@ -111,8 +138,9 @@ class RealSense(object):
 
         return {
             'timestamp': timestamp,
+            'color': color_image,
             'depth': depth_image,
-            'depth_scale': self.depth_scale,
+            'depth_scale': self.depth_scale if self.enable_depth else None,
             'point_cloud': point_cloud
         }
 

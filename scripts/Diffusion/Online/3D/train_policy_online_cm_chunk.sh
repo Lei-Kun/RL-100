@@ -14,7 +14,7 @@ config_name='rl100_3d_epsilon'
 addition_info=${3}
 seed=${4}
 ft_seed=${seed}
-train_env_num=${5:-16}
+train_env_num=${5:-1}
 exp_name=${task_name}-${alg_name}-${addition_info}
 run_dir="data/outputs/${exp_name}_seed${seed}"
 
@@ -80,9 +80,9 @@ echo -e "\033[33mstage1_run_dir: ${stage1_run_dir}\033[0m"
 echo -e "\033[33mcritic_artifact_dir: ${critic_artifact_dir}\033[0m"
 
 
-for lr_a in 2e-6; do
+for lr_a in 1e-6; do
     for K_epochs in 5; do
-            python train.py --config-name=${config_name}.yaml \
+            python train_real.py --config-name=${config_name}.yaml \
                 task=${task_name} \
                 hydra.run.dir=${run_dir} \
                 training.debug=$DEBUG \
@@ -127,11 +127,12 @@ for lr_a in 2e-6; do
                 ppo.K_epochs=${K_epochs} \
                 ppo.lr_c=3e-4 \
                 ppo.mini_batch_size=128 \
-                ppo.batch_size=1024 \
-                task.env_runner.env_num=4 \
-                task.env_runner.eval_episodes=30 \
+                ppo.batch_size=512 \
+                task.env_runner.env_num=1 \
+                task.env_runner.eval_episodes=20 \
+                task.env_runner.fake_env=False \
                 training.num_epochs=200 \
-                ++ppo.use_vec_env_online=True \
+                ++ppo.use_vec_env_online=False \
                 ++ppo.train_env_num=${train_env_num} \
                 ++ppo.eval_env_num=${train_env_num} \
                 ppo.share_encoder=False \
@@ -140,18 +141,21 @@ for lr_a in 2e-6; do
                 ppo.max_train_steps=1000000 \
                 policy.img_shape=[3,84,84] \
                 policy.use_agent_pos=True \
-                distill_phase='online' \
+                distill_phase=null \
                 update_phase='step' \
                 distill_loss_type='action_same_noise' \
                 policy.mlp_policy_depth=3 \
-                ppo.save_online_cp=False \
-                ppo.online_cp_save_freq=10 \
+                ppo.save_online_cp=True \
+                ppo.online_cp_save_freq=1 \
                 ppo.idql_batch_size=64 \
                 distill2mean=True \
                 load_bc=False \
                 clip_std_max=0.1 \
-                ppo.load_online_cp=False \
+                ppo.load_online_cp=True \
+                offline_cp_timestamp='/home/yons/Desktop/lk/RL-100/RL-100/data/outputs_two_stage_chunk/peg-rl100-peg_1024_seed42/mish/dp3vib/dp3/2026-09-22-05-37-39-lr_1e-6_rollout_3_clip_0.1_advclip_null_rmode_scalar_amode_scalar_iql_qln_True_aln_False_dln_False/2026-09-22-05-37-41' \
+                offline_cp_timestep='score_4999' \
                 ppo.iql_ft=False \
+                eval=False \
                 ppo.idql_eval=False \
                 policy.use_vib=True \
                 policy.use_recon=True \
@@ -181,7 +185,8 @@ for lr_a in 2e-6; do
                 ppo.recon=True \
                 ppo.value_recon=True \
                 ppo.per_step_recon=True \
-                ppo.force_stochastic_online=True \
+                ++ppo.critic_warmup_steps=2000 \
+                ppo.force_stochastic_online=False \
                 policy.beta_kl=1e-3
                 # ppo.scale_strategy='dynamic'
         # done

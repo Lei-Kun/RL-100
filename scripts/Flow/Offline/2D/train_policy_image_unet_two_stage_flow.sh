@@ -18,6 +18,14 @@ addition_info=${3:?addition_info is required}
 seed=${4:?seed is required}
 NUM_GPUS=${5:-4}
 
+if [ -z "${PRE_IMAGE_NORM:-}" ]; then
+    if [ "${task_name}" = "peg_2d" ]; then
+        PRE_IMAGE_NORM=False
+    else
+        PRE_IMAGE_NORM=True
+    fi
+fi
+
 config_name='rl100_2d_flow'
 exp_name=${task_name}-${alg_name}-flow-${addition_info}
 
@@ -154,15 +162,15 @@ get_common_params() {
         ++task.env_runner.with_pointcloud=False \
         policy.use_aug=True \
         policy.img_shape=[3,224,224] \
-        task.dataset.pre_image_norm=True \
+        task.dataset.pre_image_norm=${PRE_IMAGE_NORM} \
         use_recon=True \
         use_vib=True \
         dynamics_type='diffusion' \
         training.num_epochs=800 \
         training.num_critic_epochs=600 \
         dynamics.dynamics_max_epochs=350 \
-        dataloader.batch_size=512 \
-        val_dataloader.batch_size=512 \
+        dataloader.batch_size=32 \
+        val_dataloader.batch_size=32 \
         ppo.enable_ratio_logging=true \
         ppo.ratio_log_every_updates=10 \
         ppo.ratio_plot_on_final_flush=true \

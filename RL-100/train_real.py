@@ -695,15 +695,14 @@ class TrainDP3Workspace:
                 self.global_step += 1
                 self.epoch += 1
                 del step_log
-        if cfg.eval:
-            log_data = self.eval(
-                eval_times=self.cfg.unio4.eval_times,
-                online=False,
-                data_collect=self.cfg.data_collect,
-            )
-            return log_data['test_mean_score']
+        # if cfg.eval:
+        #     log_data = self.eval(
+        #         eval_times=self.cfg.unio4.eval_times,
+        #         online=False,
+        #         data_collect=self.cfg.data_collect,
+        #     )
+        #     return log_data['test_mean_score']
 
-        log_data = self.eval(eval_times=self.cfg.unio4.eval_times, online=True, traj_path='/', data_collect=self.cfg.data_collect)
         self.offline_best_path = self.get_global_best_dir()
         self.offline_last_path = os.path.join(self.output_dir, 'last')
         # =============================== stage 1-1: end diffusion training ===============================
@@ -1456,6 +1455,8 @@ class TrainDP3Workspace:
 
         wandb.define_metric('online_reward_step')
         wandb.define_metric('online_reward/*', step_metric='online_reward_step')
+        wandb.define_metric('rollout_buffer_update')
+        wandb.define_metric('rollout_buffer/*', step_metric='rollout_buffer_update')
 
         reward_scaler = None
         if self.cfg.ppo.scale_strategy == 'dynamic' or self.cfg.ppo.scale_strategy == 'number':
@@ -1548,6 +1549,7 @@ class TrainDP3Workspace:
                 self.cfg.policy.num_inference_steps = active_steps
 
         replay_buffer = ReplayBuffer(args=self.cfg.ppo, shape_info=self.shape_info, device=self.device)
+        rollout_buffer_episode_successes = []
 
         # Define replay buffer persistence paths (per-run, under this hydra output dir)
         replay_buffer_path = os.path.join(self.output_dir, 'replay_buffer_checkpoint.pkl')
@@ -1596,6 +1598,9 @@ class TrainDP3Workspace:
                         replay_buffer.count = 0
                         break
 
+                rollout_buffer_episode_successes = list(
+                    checkpoint.get('rollout_buffer_episode_successes', []))
+
                 # Restore optional image fields
                 if is_save_image:
                     if 'image' in checkpoint and hasattr(replay_buffer, 'image'):
@@ -1632,6 +1637,7 @@ class TrainDP3Workspace:
                     'done': replay_buffer.done,
                     'dw': replay_buffer.dw,
                     'count': replay_buffer.count,
+                    'rollout_buffer_episode_successes': rollout_buffer_episode_successes,
                 }
 
                 if is_save_image and hasattr(replay_buffer, 'image'):
@@ -1695,6 +1701,9 @@ class TrainDP3Workspace:
                 cprint(f"[Resume] loading online ckpt from {latest_online_cp_dir}", 'green')
                 iql, value_net = self.load_online_checkpoints(latest_online_cp_dir, iql, value_net, ema)
         self.unio4.transfer2online(critic=value_net, dynamics=dynamics, cfg=self.cfg, cm_optimizer=cm_optimizer, cm_lr_scheduler=cm_lr_scheduler)
+        critic_warmup_steps = max(
+            0, int(getattr(self.cfg.ppo, 'critic_warmup_steps', 0)))
+        critic_warmup_pending = critic_warmup_steps > 0 and not auto_load_online_cp
 
         # Sync EMA to current online policy starting point (only for fresh offline→online,
         # NOT when resuming from online checkpoint which already restored EMA)
@@ -1749,7 +1758,7 @@ class TrainDP3Workspace:
         #         cm_all_success_rates.append(0)
         #         cm_all_returns.append(0)
         # else:
-        #     log_data = self.eval(eval_times=self.cfg.unio4.eval_times, online=True, traj_path=online_ft_path, data_collect=self.cfg.data_collect)
+        #     # log_data = self.eval(eval_times=self.cfg.unio4.eval_times, online=True, traj_path=online_ft_path, data_collect=self.cfg.data_collect)
         #     if self.cfg.distill_phase == 'online':
         #         cm_log_data = self.eval(online=True, eval_times=self.cfg.unio4.eval_times, use_cm=True, distill2mean=self.cfg.distill2mean, traj_path=online_ft_path, data_collect=self.cfg.data_collect)
         #         cm_all_success_rates.append(cm_log_data['test_mean_score'])
@@ -1791,8 +1800,12 @@ class TrainDP3Workspace:
         chunk_reward_history = []
         episode_return_history = []
         episode_success_history = []
+        save_reward_plot = bool(getattr(self.cfg.ppo, 'save_reward_plot', False))
         reward_curve_path = os.path.join(online_ft_path, 'online_reward_curves.png')
+        rollout_buffer_success_path = os.path.join(
+            online_ft_path, 'rollout_buffer_success_rates.csv')
         episode_reward = 0
+        episode_success = False
         pre_reward = 0  # Track previous reward for None handling in step_online
         time1 = 0
         episode_steps = 0
@@ -1824,6 +1837,7 @@ class TrainDP3Workspace:
 
             episode_steps = 0
             episode_reward = 0
+            episode_success = False
             # obs['image'] = np.transpose(obs['image'], (0,2,3,1))
             if self.cfg.ppo.clip_std_decay:
                 decay_value = self.value_decay(initial_value=self.cfg.clip_std_max, total_steps=total_steps, max_train_steps=self.cfg.ppo.max_train_steps)
@@ -1901,6 +1915,7 @@ class TrainDP3Workspace:
                     isinstance(info, dict)
                     and np.asarray(info.get('is_success', False)).any()
                 )
+                episode_success = episode_success or chunk_success
                 reward_log = {
                     'online_reward_step': total_steps,
                     'online_reward/chunk': reward,
@@ -1909,23 +1924,61 @@ class TrainDP3Workspace:
                 if done:
                     total_episode_r.append(episode_reward)
                     episode_return_history.append(episode_reward)
-                    episode_success_history.append(float(chunk_success))
+                    episode_success_history.append(float(episode_success))
+                    rollout_buffer_episode_successes.append(float(episode_success))
                     reward_log.update({
                         'online_reward/episode_return': episode_reward,
                         'online_reward/episode_return_mean_10': float(np.mean(total_episode_r)),
-                        'online_reward/success': float(chunk_success),
+                        'online_reward/success': float(episode_success),
                     })
-                    _save_online_reward_curves(
-                        reward_curve_path,
-                        chunk_reward_history,
-                        episode_return_history,
-                        episode_success_history,
-                    )
+                    if save_reward_plot:
+                        _save_online_reward_curves(
+                            reward_curve_path,
+                            chunk_reward_history,
+                            episode_return_history,
+                            episode_success_history,
+                        )
                 wandb.log(reward_log)
                 # progress_bar.update(1)
                 total_count_sub += 1 
                 if replay_buffer.count == self.cfg.ppo.batch_size:
                     update_num += 1
+                    completed_episodes = len(rollout_buffer_episode_successes)
+                    successful_episodes = int(sum(rollout_buffer_episode_successes))
+                    rollout_buffer_success_rate = (
+                        successful_episodes / completed_episodes
+                        if completed_episodes > 0 else float('nan')
+                    )
+                    rate_text = (
+                        f'{rollout_buffer_success_rate:.4f}'
+                        if completed_episodes > 0 else 'N/A (no completed episodes)'
+                    )
+                    cprint(
+                        f'[Rollout Buffer {update_num}] transitions={replay_buffer.count}, '
+                        f'episodes={completed_episodes}, successes={successful_episodes}, '
+                        f'success_rate={rate_text}',
+                        'cyan',
+                    )
+                    write_header = not os.path.exists(rollout_buffer_success_path)
+                    with open(rollout_buffer_success_path, 'a') as f:
+                        if write_header:
+                            f.write(
+                                'update_num,total_steps,transitions,completed_episodes,'
+                                'successful_episodes,success_rate\n')
+                        f.write(
+                            f'{update_num},{total_steps},{replay_buffer.count},'
+                            f'{completed_episodes},{successful_episodes},'
+                            f'{rollout_buffer_success_rate}\n')
+                    rollout_buffer_log = {
+                        'rollout_buffer_update': update_num,
+                        'rollout_buffer/update_num': update_num,
+                        'rollout_buffer/completed_episodes': completed_episodes,
+                        'rollout_buffer/successful_episodes': successful_episodes,
+                    }
+                    if completed_episodes > 0:
+                        rollout_buffer_log['rollout_buffer/success_rate'] = rollout_buffer_success_rate
+                    wandb.log(rollout_buffer_log)
+                    rollout_buffer_episode_successes.clear()
                     if self.cfg.ppo.iql_ft:   
                         # iql_buffer.store(obs=obs_dict, action=all_x[-1], reward=reward, next_obs=next_obs, done=done)
                         if total_steps > self.cfg.ppo.online_start_training:
@@ -1950,6 +2003,24 @@ class TrainDP3Workspace:
                                 self.unio4._policy.obs_encoder.load_state_dict(iql._Q._obs_encoder.state_dict())
                             elif self.cfg.ppo.iql_v_encoder:
                                 self.unio4._policy.obs_encoder.load_state_dict(iql._value._obs_encoder.state_dict())
+                    if critic_warmup_pending:
+                        cprint(
+                            f'first buffer full: warming up critic for '
+                            f'{critic_warmup_steps} gradient steps',
+                            'yellow',
+                        )
+                        warmup_critic_loss = self.unio4.warmup_critic(
+                            replay_buffer, critic_warmup_steps)
+                        critic_warmup_pending = False
+                        wandb.log({
+                            'critic_warmup/gradient_steps': critic_warmup_steps,
+                            'critic_warmup/loss': warmup_critic_loss,
+                        })
+                        cprint(
+                            f'critic warmup complete, mean loss: '
+                            f'{warmup_critic_loss:.6f}',
+                            'green',
+                        )
                     time2 = time.time()
                     pre_training_time = time.time()
                     pre_training_time = time.time()
@@ -1980,8 +2051,7 @@ class TrainDP3Workspace:
 
                 if done:
                     if isinstance(info, dict) and 'is_success' in info:
-                        final_success = bool(np.asarray(info['is_success']).any())
-                        print(f"[Real Robot] Episode keyboard success: {final_success}")
+                        print(f"[Real Robot] Episode keyboard success: {episode_success}")
                     save_replay_buffer_checkpoint()
                     verify_replay_buffer_checkpoint()
 
@@ -2991,7 +3061,8 @@ class TrainDP3Workspace:
                     step_log['test_mean_score'] = - train_loss
                     
                 # checkpoint
-                if (self.epoch % cfg.training.checkpoint_every) == 0 and cfg.checkpoint.save_ckpt:
+                completed_epoch = self.epoch + 1
+                if (completed_epoch % cfg.training.checkpoint_every) == 0 and cfg.checkpoint.save_ckpt:
                     if phase == 'after_dp':
                         # checkpointing
                         if cfg.checkpoint.save_last_ckpt:
@@ -3017,8 +3088,9 @@ class TrainDP3Workspace:
                             self.unio4.set_policy(self.model); self.unio4.set_old_policy()
                             os.makedirs(os.path.join(self.output_dir, 'best_cm'), exist_ok=True)
                             self.unio4.save(os.path.join(self.output_dir, 'best_cm'))
-                    os.makedirs(os.path.join(self.offline_best_path, '_{}'.format(str(self.epoch))), exist_ok=True)
-                    model_to_optimize.save(os.path.join(os.path.join(self.offline_best_path, '_{}'.format(str(self.epoch)))))
+                    epoch_checkpoint_dir = os.path.join(self.offline_best_path, f'epoch_{completed_epoch:04d}')
+                    os.makedirs(epoch_checkpoint_dir, exist_ok=True)
+                    model_to_optimize.save(epoch_checkpoint_dir)
                     os.makedirs(os.path.join(self.offline_best_path, 'last'), exist_ok=True)
                     model_to_optimize.save(os.path.join(self.offline_best_path, 'last'))
                     # if phase == 'after_offline':
@@ -3309,8 +3381,12 @@ class TrainDP3Workspace:
 
         for key, value in payload['state_dicts'].items():
             if key not in exclude_keys and key in self.__dict__:
+                target = self.__dict__[key]
+                if target is None:
+                    print(f"Warning: Skipping state_dict for disabled component '{key}'.")
+                    continue
                 try:
-                    self.__dict__[key].load_state_dict(value, **kwargs)
+                    target.load_state_dict(value, **kwargs)
                 except (RuntimeError, ValueError) as e:
                     print(f"Warning: Ignoring keys in state_dict for {key}: {e}")
                     # 特别处理optimizer相关的错误

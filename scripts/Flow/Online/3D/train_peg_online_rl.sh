@@ -43,7 +43,7 @@ export PYOPENGL_PLATFORM=egl
 export HYDRA_FULL_ERROR=1 
 
 export CUDA_VISIBLE_DEVICES=${gpu_id}
-export CUDA_LAUNCH_BLOCKING=1
+export CUDA_LAUNCH_BLOCKING=0
 export MUJOCO_EGL_DEVICE_ID=${gpu_id}
 export EGL_DEVICE_ID=${gpu_id}
 act=${act:-'mish'}
@@ -80,7 +80,7 @@ echo -e "\033[33mstage1_run_dir: ${stage1_run_dir}\033[0m"
 echo -e "\033[33mcritic_artifact_dir: ${critic_artifact_dir}\033[0m"
 
 
-for lr_a in 2e-6; do
+for lr_a in 1e-6; do
     for K_epochs in 5; do
             python train_real.py --config-name=${config_name}.yaml \
                 task=${task_name} \
@@ -114,7 +114,7 @@ for lr_a in 2e-6; do
                 flow_distill_teacher_steps=10 \
                 flow_sde_type='cps' \
                 flow_cps_logprob_mode='gaussian' \
-                flow_noise_level=0.7 \
+                flow_noise_level=0.25 \
                 flow_sde_window_size=0 \
                 flow_logit_normal_sampling=False \
                 flow_noise_on_final_step=True \
@@ -135,9 +135,9 @@ for lr_a in 2e-6; do
                 ppo.K_epochs=${K_epochs} \
                 ppo.lr_c=3e-4 \
                 ppo.mini_batch_size=128 \
-                ppo.batch_size=128 \
+                ppo.batch_size=1024 \
                 task.env_runner.env_num=1 \
-                task.env_runner.eval_episodes=1 \
+                task.env_runner.eval_episodes=10 \
                 task.env_runner.fake_env=False \
                 ++ppo.use_vec_env_online=False \
                 ++ppo.train_env_num=${train_env_num} \
@@ -149,18 +149,25 @@ for lr_a in 2e-6; do
                 policy.img_shape=[3,84,84] \
                 policy.use_agent_pos=True \
                 distill_phase=null \
+                training.use_ema=True \
+                training.checkpoint_every=10 \
                 update_phase='step' \
+                distill_loss_type='action_same_noise' \
                 policy.mlp_policy_depth=3 \
                 ppo.save_online_cp=True \
                 ppo.online_cp_save_freq=1 \
-                distill2mean=False \
-                load_bc=True \
-                clip_std_max=0.1 \
-                ppo.load_online_cp=True \
+                ++ppo.save_reward_plot=False \
+                distill2mean=True \
+                load_bc=False \
+                clip_std_max=0.05 \
+                ppo.load_online_cp=False \
+                offline_cp_timestamp='/home/yons/Desktop/lk/RL-100/RL-100/data/outputs_two_stage_chunk_flow/peg-rl100-peg_1024_seed20/mish/dp3vib/dp3/2026-09-21-04-48-19-lr_1e-6_rollout_3_clip_0.1_advclip_null_rmode_scalar_amode_scalar_iql_qln_True_aln_False_dln_False/2026-09-21-04-48-22' \
+                offline_cp_timestep='score_4999' \
                 ppo.iql_ft=False \
+                eval=False \
                 ppo.idql_eval=False \
-                dataloader.num_workers=0 \
-                val_dataloader.num_workers=0 \
+                dataloader.num_workers=4 \
+                val_dataloader.num_workers=4 \
                 policy.use_vib=True \
                 policy.use_recon=True \
                 dynamics_type='mlp' \
@@ -190,6 +197,6 @@ for lr_a in 2e-6; do
                 ppo.value_recon=True \
                 ppo.per_step_recon=True \
                 ppo.force_stochastic_online=True \
-                policy.beta_kl=1e-3
+                policy.beta_kl=5e-3
     done
 done

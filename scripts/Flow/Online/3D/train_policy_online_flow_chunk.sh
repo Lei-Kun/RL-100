@@ -153,7 +153,7 @@ for lr_a in 2e-6; do
                 policy.mlp_policy_depth=3 \
                 ppo.save_online_cp=False \
                 ppo.online_cp_save_freq=10 \
-                distill2mean=False \
+                distill2mean=True \
                 load_bc=False \
                 clip_std_max=0.1 \
                 ppo.load_online_cp=False \

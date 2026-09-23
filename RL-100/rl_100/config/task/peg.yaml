@@ -31,7 +31,7 @@ env_runner:
   fake_env: True
   state_shape: 7
   gamma: ${gamma}
-  smooth_penalty: 0.001
+  smooth_penalty: 0.0
   success_reward: 2.0
   failure_reward: -1.0
 norm_dataset:
@@ -45,6 +45,7 @@ norm_dataset:
   max_train_episodes: 9000000
   pre_image_norm: False
   sequence_stride: 1
+  derive_next_obs: True
   derive_next_action: True
 dataset:
   _target_: rl_100.dataset.pusht_dataset.PushTDataset
@@ -57,6 +58,7 @@ dataset:
   max_train_episodes: 9000000
   pre_image_norm: False
   sequence_stride: 1
+  derive_next_obs: True
   derive_next_action: True
 critic_dataset:
   _target_: rl_100.dataset.pusht_dataset.PushTDataset
@@ -69,6 +71,7 @@ critic_dataset:
   max_train_episodes: 9000000
   pre_image_norm: False
   sequence_stride: 1
+  derive_next_obs: True
   derive_next_action: True
 finetune_dataset:
   _target_: rl_100.dataset.pusht_dataset.PushTDataset
@@ -81,6 +84,7 @@ finetune_dataset:
   max_train_episodes: 9000000
   pre_image_norm: False
   sequence_stride: 1
+  derive_next_obs: True
   derive_next_action: True
 scale_dataset:
   _target_: rl_100.dataset.pusht_dataset.PushTDataset
@@ -94,4 +98,5 @@ scale_dataset:
   scale_strategy: 'dynamic'
   pre_image_norm: False
   sequence_stride: 1
+  derive_next_obs: True
   derive_next_action: True

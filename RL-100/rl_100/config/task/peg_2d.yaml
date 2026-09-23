@@ -1,0 +1,77 @@
+name: peg_2d
+
+task_name: peg
+crop_shape: null
+
+shape_meta: &shape_meta
+  obs:
+    external_img:
+      shape: [3, 224, 224]
+      type: rgb
+    wrist_img:
+      shape: [3, 224, 224]
+      type: rgb
+    point_cloud:
+      shape: [1024, 3]
+      type: point_cloud
+    agent_pos:
+      shape: [7]
+      type: low_dim
+  action:
+    shape: [8]
+
+env_runner:
+  _target_: rl_100.env_runner.peg_runner.PegRunner
+  eval_episodes: 1
+  max_steps: 500
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  fps: 10
+  task_name: peg_2d
+  render_size: 224
+  use_point_crop: false
+  env_num: 1
+  with_image: true
+  with_pointcloud: false
+  image_keys: [external_img, wrist_img]
+  external_camera_serial: f1380379
+  wrist_camera_serial: '143322071911'
+  camera_color_fps: 15
+  camera_depth_fps: 30
+  fake_env: true
+  num_points: 1024
+  state_shape: 7
+  gamma: ${gamma}
+  smooth_penalty: 0.0
+  success_reward: 2.0
+  failure_reward: -1.0
+
+norm_dataset: &dataset
+  _target_: rl_100.dataset.pusht_dataset.PushTDataset
+  zarr_path: /data/hdd2/xarm_teleop/data/data_peg.zarr
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: 42
+  val_ratio: 0.0
+  max_train_episodes: 9000000
+  pre_image_norm: false
+  use_img: true
+  image_keys: [external_img, wrist_img]
+  derive_next_image: true
+  derive_next_obs: true
+  sequence_stride: 1
+  derive_next_action: true
+
+dataset:
+  <<: *dataset
+
+critic_dataset:
+  <<: *dataset
+
+finetune_dataset:
+  <<: *dataset
+
+scale_dataset:
+  <<: *dataset
+  scale_strategy: dynamic

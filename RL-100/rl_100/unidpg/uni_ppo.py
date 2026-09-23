@@ -1092,6 +1092,79 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
                     lr=self.args.lr_a, eps=1e-5)
 
         self.optimizer_critic = torch.optim.Adam(self.critic.parameters(), lr=self.args.lr_c, eps=1e-5)
+
+    def warmup_critic(self, replay_buffer, gradient_steps):
+        """Fit only the critic on the first full online rollout buffer."""
+        gradient_steps = int(gradient_steps)
+        if gradient_steps <= 0:
+            return 0.0
+
+        s, _, _, r, s_, dw, done = replay_buffer.numpy_to_tensor()
+        with torch.no_grad():
+            if self.args.share_encoder:
+                vs, vs_ = self._compute_critic_values_in_chunks(
+                    s, s_, use_obs2latent=True)
+            else:
+                vs, vs_ = self._compute_critic_values_in_chunks(
+                    s, s_, use_obs2latent=False)
+
+            gamma = self.args.gamma ** self.cfg.n_action_steps
+            deltas = r + gamma * (1.0 - dw) * vs_ - vs
+            advantages = []
+            gae = 0
+            for delta, d in zip(
+                    reversed(deltas.flatten().cpu().numpy()),
+                    reversed(done.flatten().cpu().numpy())):
+                gae = delta + gamma * self.args.lamda * gae * (1.0 - d)
+                advantages.insert(0, gae)
+            advantages = torch.tensor(
+                advantages, dtype=torch.float, device=self._device).view(-1, 1)
+            value_targets = advantages + vs
+
+        batch_size = r.shape[0]
+        mini_batch_size = min(int(self.args.mini_batch_size), batch_size)
+        critic_losses = []
+        self.critic.train()
+        for _ in tqdm(range(gradient_steps), desc='Critic warmup'):
+            index = torch.randint(
+                batch_size, (mini_batch_size,), device=self._device)
+            state = dict_apply(s, lambda x: x[index])
+
+            if self.args.share_encoder:
+                with torch.no_grad():
+                    critic_input = self._policy.obs2latent(state)
+            else:
+                critic_input = self._policy.obs2this_nobs(state)
+
+            if self.args.value_recon:
+                assert not self.args.share_encoder, \
+                    "value_recon=True requires share_encoder=False so critic has its own obs_encoder."
+                if isinstance(self.critic, torch.nn.Sequential):
+                    critic_recon_loss, _, critic_features = \
+                        self.critic[0].Recon_VIB_loss(critic_input)
+                    value_pred = self.critic[1](critic_features)
+                else:
+                    critic_recon_loss, _, critic_features = \
+                        self.critic._obs_encoder.Recon_VIB_loss(critic_input)
+                    value_pred = self.critic(critic_features)
+            else:
+                value_pred = self.critic(critic_input)
+
+            critic_loss = F.mse_loss(value_pred, value_targets[index].detach().float())
+            if self.args.value_recon:
+                critic_loss += critic_recon_loss
+
+            self.optimizer_critic.zero_grad()
+            critic_loss.backward()
+            if self.args.use_grad_clip:
+                torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
+            self.optimizer_critic.step()
+            critic_losses.append(critic_loss.item())
+
+        if self.args.fix_encoder and self.args.v_encoder:
+            self._policy.obs_encoder.load_state_dict(self.critic[0].state_dict())
+        return float(np.mean(critic_losses))
+
     def dp_align_update_no_share(self, replay_buffer, total_steps, precomputed=None):
         self.iteration += 1
         # bc training before ppo improvement

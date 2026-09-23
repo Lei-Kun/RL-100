@@ -9,6 +9,7 @@ from rl_100.common.sampler import (
 from rl_100.model.common.normalizer import LinearNormalizer, SingleFieldLinearNormalizer
 from rl_100.dataset.base_dataset import BaseDataset
 from rl_100.unidpg.utils import RewardScaling
+from rl_100.common.normalize_util import get_image_range_normalizer
 
 from termcolor import cprint
 from tqdm import tqdm
@@ -34,23 +35,51 @@ class PushTDataset(BaseDataset):
             scale_strategy=None,
             pre_image_norm=False,   
             use_img=False,
+            image_keys=None,
+            derive_next_image=False,
+            derive_next_obs=False,
             sequence_stride=1,
             derive_next_action=False,
             ):
         super().__init__()
         self.task_name = task_name
         self.use_img = use_img
+        self.pre_image_norm = pre_image_norm
+        self.derive_next_image = bool(derive_next_image)
+        self.derive_next_obs = bool(derive_next_obs)
+        self.derive_next_action = bool(derive_next_action)
+        if image_keys is None:
+            self.image_key_map = {'image': 'img'}
+        else:
+            self.image_key_map = {key: key for key in image_keys}
+        keys = [
+            'state', 'action', 'point_cloud', 'reward', 'done', 'timeout', 'return'
+        ]
+        if not self.derive_next_obs:
+            keys.extend(['next_state', 'next_point_cloud'])
+        if not self.derive_next_action:
+            keys.append('next_action')
+        if self.use_img:
+            for zarr_key in self.image_key_map.values():
+                keys.append(zarr_key)
+                if not self.derive_next_image:
+                    keys.append(f'next_{zarr_key}')
         self.replay_buffer = ReplayBuffer.copy_from_path(
-            zarr_path, keys=['state', 'action', 'point_cloud', 'next_state', 'next_action', 'next_point_cloud', 'reward', 'done', 'timeout', 'return'])
-        if derive_next_action:
-            action = self.replay_buffer['action']
-            next_action = action.copy()
-            episode_start = 0
-            for episode_end in self.replay_buffer.episode_ends:
-                next_action[episode_start:episode_end - 1] = action[episode_start + 1:episode_end]
-                next_action[episode_end - 1] = action[episode_end - 1]
-                episode_start = episode_end
-            self.replay_buffer.root['data']['next_action'] = next_action
+            zarr_path, keys=keys)
+        if self.derive_next_obs or self.derive_next_action or (
+            self.use_img and self.derive_next_image
+        ):
+            n_frames = int(self.replay_buffer.episode_ends[-1])
+            self.next_frame_index = np.minimum(
+                np.arange(n_frames, dtype=np.int64) + 1,
+                n_frames - 1,
+            )
+            self.next_frame_index[self.replay_buffer.episode_ends - 1] = (
+                self.replay_buffer.episode_ends - 1
+            )
+            self.replay_buffer.root['data']['_frame_index'] = np.arange(
+                n_frames, dtype=np.int64
+            )
         # construct scaled reward and return
         # import pdb; pdb.set_trace()
         if scale_strategy == 'dynamic':
@@ -122,14 +151,29 @@ class PushTDataset(BaseDataset):
         return val_set
 
     def get_normalizer(self, mode='limits', **kwargs):
+        next_action = (
+            self.replay_buffer['action']
+            if self.derive_next_action
+            else self.replay_buffer['next_action']
+        )
+        next_state = (
+            self.replay_buffer['state']
+            if self.derive_next_obs
+            else self.replay_buffer['next_state']
+        )
+        next_point_cloud = (
+            self.replay_buffer['point_cloud']
+            if self.derive_next_obs
+            else self.replay_buffer['next_point_cloud']
+        )
         data = {
             'action': self.replay_buffer['action'],
             'agent_pos': self.replay_buffer['state'][...,:],
             'point_cloud': self.replay_buffer['point_cloud'],
 
-            'next_action': self.replay_buffer['next_action'],
-            'next_agent_pos': self.replay_buffer['next_state'][...,:],
-            'next_point_cloud': self.replay_buffer['next_point_cloud'],
+            'next_action': next_action,
+            'next_agent_pos': next_state[...,:],
+            'next_point_cloud': next_point_cloud,
 
             # 'reward': self.replay_buffer['reward'],
             # 'not_done': 1. - self.replay_buffer['done'],
@@ -137,21 +181,47 @@ class PushTDataset(BaseDataset):
         }
         normalizer = LinearNormalizer()
         normalizer.fit(data=data, last_n_dims=1, mode=mode, **kwargs)
+        if self.use_img and self.pre_image_norm:
+            for obs_key in self.image_key_map:
+                normalizer[obs_key] = get_image_range_normalizer()
         return normalizer
 
     def __len__(self) -> int:
         return len(self.sampler)
 
+    @staticmethod
+    def _prepare_image(image):
+        image = np.asarray(image)
+        is_integer = np.issubdtype(image.dtype, np.integer)
+        image = image.astype(np.float32)
+        if is_integer:
+            image /= 255.0
+        if image.ndim == 4 and image.shape[-1] == 3:
+            image = np.moveaxis(image, -1, 1)
+        return image
+
     def _sample_to_data(self, sample):
         agent_pos = sample['state'][:,].astype(np.float32) # (agent_posx2, block_posex3)
         point_cloud = sample['point_cloud'][:,].astype(np.float32) # (T, 1024, 6)
-        # image = sample['img'][:,].astype(np.float32) # (T, 3, 64, 64)
-
-        # image = np.random.rand(point_cloud.shape[0], 3, 84, 84)  # dummy image
-        
-        next_agent_pos = sample['next_state'][:,].astype(np.float32) # (agent_posx2, block_posex3)
-        next_point_cloud = sample['next_point_cloud'][:,].astype(np.float32) # (T, 1024, 6)
-        # next_image = np.random.rand(point_cloud.shape[0], 3, 84, 84)  # dummy image
+        needs_next_indices = self.derive_next_obs or self.derive_next_action or (
+            self.use_img and self.derive_next_image
+        )
+        next_indices = (
+            self.next_frame_index[sample['_frame_index']]
+            if needs_next_indices
+            else None
+        )
+        if self.derive_next_obs:
+            next_agent_pos = self.replay_buffer['state'][next_indices].astype(np.float32)
+            next_point_cloud = self.replay_buffer['point_cloud'][next_indices].astype(np.float32)
+        else:
+            next_agent_pos = sample['next_state'][:,].astype(np.float32)
+            next_point_cloud = sample['next_point_cloud'][:,].astype(np.float32)
+        next_action = (
+            self.replay_buffer['action'][next_indices].astype(np.float32)
+            if self.derive_next_action
+            else sample['next_action'].astype(np.float32)
+        )
 
         data = {
             'obs': {
@@ -168,26 +238,36 @@ class PushTDataset(BaseDataset):
             'not_done': 1. - sample['done'].astype(np.bool_), # T, D_action
             'return': sample['return'].astype(np.float32), # T, D_action
             'action': sample['action'].astype(np.float32), # T, D_action
-            'next_action': sample['next_action'].astype(np.float32) # T, D_action
+            'next_action': next_action # T, D_action
         }
+        if self.use_img:
+            for obs_key, zarr_key in self.image_key_map.items():
+                data['obs'][obs_key] = self._prepare_image(sample[zarr_key])
+                if self.derive_next_image:
+                    next_image = self.replay_buffer[zarr_key][next_indices]
+                else:
+                    next_image = sample[f'next_{zarr_key}']
+                data['next_obs'][obs_key] = self._prepare_image(next_image)
 
         return data
     def get_shape_info(self, n_action_steps, n_obs_steps):
-        sample = self.sampler.sample_sequence(10)
+        sample = self.sampler.sample_sequence(0)
         agent_pos = sample['state'][:,].astype(np.float32) # (agent_posx2, block_posex3)
         point_cloud = sample['point_cloud'][:,].astype(np.float32) # (T, 1024, 6)
         # import pdb; pdb.set_trace()
-        image = np.random.rand(point_cloud.shape[0], 3, 84, 84)  # dummy image
-        # image = sample['img'][:,].astype(np.float32) # (T, 3, 64, 64)
-
         shape_info = {
         'obs': {
             'point_cloud': (n_obs_steps,) + point_cloud.shape[1:],
             'agent_pos': (n_obs_steps,) + agent_pos.shape[1:],
-            'image': (n_obs_steps,) + image.shape[1:],
         },
         'action': (n_action_steps, sample['action'].shape[-1]),
         }
+        if self.use_img:
+            for obs_key, zarr_key in self.image_key_map.items():
+                image = self._prepare_image(sample[zarr_key])
+                shape_info['obs'][obs_key] = (n_obs_steps,) + image.shape[1:]
+        else:
+            shape_info['obs']['image'] = (n_obs_steps, 3, 84, 84)
         return shape_info
     def get_all_data(self,) -> Dict[str, torch.Tensor]:
         sample = self.sampler.sample_sequence(range(self.replay_buffer['action'].shape[0]))

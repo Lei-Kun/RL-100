@@ -202,7 +202,7 @@ get_common_params() {
         critic.q_lr=1.4e-4 \
         critic.v_lr=1.4e-4 \
         dynamics.dynamics_lr=5.66e-4 \
-        distill_phase=null \
+        distill_phase='after_offline' \
         predict_r=True \
         chunk_as_single_action=True \
         bppo_chunk_level_ratio=True \

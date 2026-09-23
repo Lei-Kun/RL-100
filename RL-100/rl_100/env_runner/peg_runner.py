@@ -30,7 +30,9 @@ class PegRunner(BaseRunner):
         task_name='peg',
         use_point_crop=True,
         env_num=1,
+        with_image=False,
         with_pointcloud=True,
+        image_keys=None,
         fake_env=False,
         num_points=1024,
         state_shape=7,
@@ -38,6 +40,10 @@ class PegRunner(BaseRunner):
         use_ee=False,
         gamma=0.99,
         robot_ip='192.168.1.202',
+        external_camera_serial=None,
+        wrist_camera_serial=None,
+        camera_color_fps=15,
+        camera_depth_fps=30,
         smooth_penalty=0.001,
         success_reward=2.0,
         failure_reward=-1.0,
@@ -51,12 +57,15 @@ class PegRunner(BaseRunner):
         self.tqdm_interval_sec = float(tqdm_interval_sec)
         self.fake_env = bool(fake_env)
         self.use_ee = bool(use_ee)
+        self.with_image = bool(with_image)
+        self.with_pointcloud = bool(with_pointcloud)
+        self.image_keys = tuple(image_keys or ['image'])
         self.handles_keyboard_result = True
         self.logger_util_test = logger_util.LargestKRecorder(K=3)
         self.logger_util_test10 = logger_util.LargestKRecorder(K=5)
 
         # These arguments are part of the common runner config interface.
-        _ = (fps, crf, render_size, use_point_crop, env_num, with_pointcloud, state_shape)
+        _ = (fps, crf, use_point_crop, env_num, state_shape)
 
         self.env = None
         if not self.fake_env:
@@ -67,6 +76,14 @@ class PegRunner(BaseRunner):
                 robot_ip=robot_ip,
                 dt=dt,
                 num_point_cloud=num_points,
+                image_size=render_size,
+                with_image=self.with_image,
+                with_pointcloud=self.with_pointcloud,
+                image_keys=self.image_keys,
+                external_camera_serial=external_camera_serial,
+                wrist_camera_serial=wrist_camera_serial,
+                camera_color_fps=camera_color_fps,
+                camera_depth_fps=camera_depth_fps,
                 max_episode_steps=max_steps,
                 smooth_penalty=smooth_penalty,
                 success_reward=success_reward,
@@ -177,7 +194,6 @@ class PegRunner(BaseRunner):
                 episode_return += float(rewards.sum())
                 episode_success = episode_success or bool(success.any())
                 step_count += executed
-
                 if data_collect:
                     self._append_transitions(
                         episode_data,
@@ -216,17 +232,19 @@ class PegRunner(BaseRunner):
 
     def _make_policy_input(self, obs, device):
         state_key = 'ee_pose' if self.use_ee else 'agent_pos'
-        return {
+        policy_input = {
             'point_cloud': torch.as_tensor(
                 obs['point_cloud'][-self.n_obs_steps:], device=device, dtype=torch.float32
             ).unsqueeze(0),
             'agent_pos': torch.as_tensor(
                 obs[state_key][-self.n_obs_steps:], device=device, dtype=torch.float32
             ).unsqueeze(0),
-            'image': torch.as_tensor(
-                obs['image'][-self.n_obs_steps:], device=device, dtype=torch.float32
-            ).unsqueeze(0),
         }
+        for image_key in self.image_keys:
+            policy_input[image_key] = torch.as_tensor(
+                obs[image_key][-self.n_obs_steps:], device=device, dtype=torch.float32
+            ).unsqueeze(0)
+        return policy_input
 
     def _as_action_chunk(self, action_result):
         if not isinstance(action_result, dict) or 'action' not in action_result:
@@ -259,14 +277,17 @@ class PegRunner(BaseRunner):
             values = np.pad(values, (0, length - len(values)), constant_values=False)
         return values[:length]
 
-    @staticmethod
-    def _empty_episode_data():
+    def _empty_episode_data(self):
         keys = (
             'state', 'action', 'point_cloud',
             'next_state', 'next_point_cloud',
             'reward', 'done', 'timeout', 'is_success',
         )
-        return {key: [] for key in keys}
+        data = {key: [] for key in keys}
+        if self.with_image:
+            for image_key in self.image_keys:
+                data[image_key] = []
+        return data
 
     def _append_transitions(
         self,
@@ -288,6 +309,13 @@ class PegRunner(BaseRunner):
             data['point_cloud'].append(
                 current_obs['point_cloud'][-1] if idx == 0 else next_obs['point_cloud'][previous_idx]
             )
+            if self.with_image:
+                for image_key in self.image_keys:
+                    data[image_key].append(
+                        current_obs[image_key][-1]
+                        if idx == 0
+                        else next_obs[image_key][previous_idx]
+                    )
             data['action'].append(action)
             data['next_state'].append(next_obs[state_key][idx])
             data['next_point_cloud'].append(next_obs['point_cloud'][idx])

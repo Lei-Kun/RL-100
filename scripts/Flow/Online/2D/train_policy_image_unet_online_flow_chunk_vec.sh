@@ -158,7 +158,7 @@ for lr_a in 2e-6; do
                 task.scale_dataset.pre_image_norm=True \
                 distill_phase='null' \
                 distill_loss_type='action_same_noise' \
-                distill2mean=False \
+                distill2mean=True \
                 update_phase='step' \
                 ppo.save_online_cp=False \
                 ppo.online_cp_save_freq=50 \

@@ -18,6 +18,16 @@ addition_info=${3:?addition_info is required}
 seed=${4:?seed is required}
 NUM_GPUS=${5:-1}
 
+if [ "${task_name}" = "peg_2d" ]; then
+    PRE_IMAGE_NORM=${PRE_IMAGE_NORM:-False}
+    BATCH_SIZE=${BATCH_SIZE:-32}
+    VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-32}
+else
+    PRE_IMAGE_NORM=${PRE_IMAGE_NORM:-True}
+    BATCH_SIZE=${BATCH_SIZE:-512}
+    VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-512}
+fi
+
 config_name=${config_name:-'rl100_2d_epsilon'}
 exp_name=${task_name}-${alg_name}-${addition_info}
 
@@ -36,7 +46,7 @@ LR_VALUES=${LR_VALUES:-"1e-6 1.42e-6 2.83e-6"}
 ROLLOUT_VALUES=${ROLLOUT_VALUES:-"3 5 10"}
 CLIP_STD_MAX_VALUES=${CLIP_STD_MAX_VALUES:-"0.1 null"}
 CHUNK_ADV_CLIP_VALUES=${CHUNK_ADV_CLIP_VALUES:-"null"}
-CHUNK_LOSS_MODE_COMBOS=${CHUNK_LOSS_MODE_COMBOS:-"scalar:scalar_iql scalar:chunk_vdelta_scalar scalar:chunk_vdelta_gae"}
+CHUNK_LOSS_MODE_COMBOS=${CHUNK_LOSS_MODE_COMBOS:-"scalar:scalar_iql"}
 CHUNK_VDELTA_GAE_N_ROLLOUT=${CHUNK_VDELTA_GAE_N_ROLLOUT:-3}
 CHUNK_VDELTA_GAE_LAMBDA=${CHUNK_VDELTA_GAE_LAMBDA:-0.95}
 CHUNK_VDELTA_GAE_CHUNK_SOURCE=${CHUNK_VDELTA_GAE_CHUNK_SOURCE:-repeat_first}
@@ -62,6 +72,11 @@ fi
 N_OBS_STEPS=${N_OBS_STEPS:-3}
 N_ACTION_STEPS=${N_ACTION_STEPS:-16}
 HORIZON=${HORIZON:-$((N_ACTION_STEPS + N_OBS_STEPS - 1))}
+
+if [ "$((HORIZON - N_OBS_STEPS + 1))" -ne "${N_ACTION_STEPS}" ]; then
+    echo "Expected horizon - n_obs_steps + 1 == n_action_steps" >&2
+    exit 1
+fi
 
 # Stride overrides for offline chunk boundary experiments
 CRITIC_STRIDE=${CRITIC_STRIDE:-${N_ACTION_STEPS}}
@@ -186,9 +201,11 @@ get_common_params() {
         critic.omega=0.9 \
         critic.gamma=0.997 \
         policy.img_shape=[3,224,224] \
-        task.dataset.pre_image_norm=True \
-        ++task.critic_dataset.pre_image_norm=True \
-        ++task.finetune_dataset.pre_image_norm=True \
+        task.norm_dataset.pre_image_norm=${PRE_IMAGE_NORM} \
+        task.dataset.pre_image_norm=${PRE_IMAGE_NORM} \
+        ++task.critic_dataset.pre_image_norm=${PRE_IMAGE_NORM} \
+        ++task.finetune_dataset.pre_image_norm=${PRE_IMAGE_NORM} \
+        ++task.scale_dataset.pre_image_norm=${PRE_IMAGE_NORM} \
         use_recon=True \
         use_vib=True \
         dynamics_type='diffusion' \
@@ -196,8 +213,8 @@ get_common_params() {
         training.num_epochs=600 \
         training.num_critic_epochs=600 \
         dynamics.dynamics_max_epochs=350 \
-        dataloader.batch_size=512 \
-        val_dataloader.batch_size=512 \
+        dataloader.batch_size=${BATCH_SIZE} \
+        val_dataloader.batch_size=${VAL_BATCH_SIZE} \
         ppo.enable_ratio_logging=true \
         ppo.ratio_log_every_updates=10 \
         ppo.ratio_plot_on_final_flush=true \
