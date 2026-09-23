@@ -18,6 +18,16 @@ addition_info=${3:?addition_info is required}
 seed=${4:?seed is required}
 NUM_GPUS=${5:-1}
 
+if [ "${task_name}" = "peg_2d" ]; then
+    PRE_IMAGE_NORM=${PRE_IMAGE_NORM:-False}
+    BATCH_SIZE=${BATCH_SIZE:-32}
+    VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-32}
+else
+    PRE_IMAGE_NORM=${PRE_IMAGE_NORM:-True}
+    BATCH_SIZE=${BATCH_SIZE:-512}
+    VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-512}
+fi
+
 config_name=${config_name:-'rl100_2d_flow'}
 exp_name=${task_name}-${alg_name}-${addition_info}
 
@@ -193,9 +203,9 @@ get_common_params() {
         critic.omega=0.9 \
         critic.gamma=0.997 \
         policy.img_shape=[3,224,224] \
-        task.dataset.pre_image_norm=True \
-        ++task.critic_dataset.pre_image_norm=True \
-        ++task.finetune_dataset.pre_image_norm=True \
+        task.dataset.pre_image_norm=${PRE_IMAGE_NORM} \
+        ++task.critic_dataset.pre_image_norm=${PRE_IMAGE_NORM} \
+        ++task.finetune_dataset.pre_image_norm=${PRE_IMAGE_NORM} \
         use_recon=True \
         use_vib=True \
         dynamics_type='diffusion' \
@@ -203,8 +213,8 @@ get_common_params() {
         training.num_epochs=800 \
         training.num_critic_epochs=600 \
         dynamics.dynamics_max_epochs=350 \
-        dataloader.batch_size=512 \
-        val_dataloader.batch_size=512 \
+        dataloader.batch_size=${BATCH_SIZE} \
+        val_dataloader.batch_size=${VAL_BATCH_SIZE} \
         ppo.enable_ratio_logging=true \
         ppo.ratio_log_every_updates=10 \
         ppo.ratio_plot_on_final_flush=true \
