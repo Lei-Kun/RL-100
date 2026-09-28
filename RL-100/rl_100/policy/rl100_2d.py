@@ -122,6 +122,10 @@ class RL1002D(BasePolicy):
             raise NotImplementedError(f"Unsupported action shape {action_shape}")
         self.use_recon = use_recon
         obs_shape_meta = shape_meta['obs']
+        self.rgb_obs_keys = tuple(
+            key for key, attr in obs_shape_meta.items()
+            if attr.get('type', 'low_dim') == 'rgb'
+        )
         obs_dict = dict_apply(obs_shape_meta, lambda x: x['shape'])
         self.agent_pos_dim = obs_dict['agent_pos'][0]
         self.action_dim = action_dim
@@ -279,6 +283,11 @@ class RL1002D(BasePolicy):
         # 添加图片保存计数器
         self.image_save_count = 0
         self.max_images_to_save = 50  # 最多保存50张图片以避免存储过多
+
+    def _augment_rgb_obs(self, obs_dict):
+        for key in self.rgb_obs_keys:
+            if key in obs_dict:
+                obs_dict[key] = self.aug(obs_dict[key].float())
 
     def get_unet_timesteps(self, timesteps):
         """Convert scheduler timesteps to UNet-compatible integer timesteps.
@@ -552,11 +561,7 @@ class RL1002D(BasePolicy):
             this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]).to(self.device)) # [2 i.e. batch_size * n_obs, 512, 3], [2, 24] 
             if self.use_aug:
                 if training:
-                    for key in list(this_nobs.keys()):
-                        if ('image' in key.lower() or 'rgb' in key.lower()) and this_nobs[key].dtype == torch.float32:
-                            this_nobs[key] = self.aug(this_nobs[key].float())
-                        elif ('image' in key.lower() or 'rgb' in key.lower()):
-                            this_nobs[key] = self.aug(this_nobs[key].float())
+                    self._augment_rgb_obs(this_nobs)
             if fix_encoder:
                 self.obs_encoder.eval()
             nobs_features = self.obs_encoder(this_nobs) # [2, 128]
@@ -574,11 +579,7 @@ class RL1002D(BasePolicy):
             this_nobs = dict_apply(nobs, lambda x: x[:,:To,...].reshape(-1,*x.shape[2:]).to(self.device))
             if self.use_aug:
                 if training:
-                    for key in list(this_nobs.keys()):
-                        if ('image' in key.lower() or 'rgb' in key.lower()) and this_nobs[key].dtype == torch.float32:
-                            this_nobs[key] = self.aug(this_nobs[key].float())
-                        elif ('image' in key.lower() or 'rgb' in key.lower()):
-                            this_nobs[key] = self.aug(this_nobs[key].float())
+                    self._augment_rgb_obs(this_nobs)
             if fix_encoder:
                 self.obs_encoder.eval()
             nobs_features = self.obs_encoder(this_nobs)
@@ -748,11 +749,7 @@ class RL1002D(BasePolicy):
         this_nobs = dict_apply(nobs, 
             lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]).to(self.device))
         if self.use_aug and training:
-            for key in list(this_nobs.keys()):
-                if ('image' in key.lower() or 'rgb' in key.lower()) and this_nobs[key].dtype == torch.float32:
-                    this_nobs[key] = self.aug(this_nobs[key].float())
-                elif ('image' in key.lower() or 'rgb' in key.lower()):
-                    this_nobs[key] = self.aug(this_nobs[key].float())
+            self._augment_rgb_obs(this_nobs)
         if eval_encoder:
             self.obs_encoder.eval()
         if hasattr(self.obs_encoder, '_apply_transform'):
@@ -771,11 +768,7 @@ class RL1002D(BasePolicy):
         this_nobs = dict_apply(nobs, 
             lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]).to(self.device))
         if self.use_aug and training:
-            for key in list(this_nobs.keys()):
-                if ('image' in key.lower() or 'rgb' in key.lower()) and this_nobs[key].dtype == torch.float32:
-                    this_nobs[key] = self.aug(this_nobs[key].float())
-                elif ('image' in key.lower() or 'rgb' in key.lower()):
-                    this_nobs[key] = self.aug(this_nobs[key].float())
+            self._augment_rgb_obs(this_nobs)
         if self.encoder_type == 'vit':
             nobs_features = self.obs_encoder(this_nobs)
             vib_recon_loss = self.obs_encoder.calculate_loss(this_nobs)
@@ -796,11 +789,7 @@ class RL1002D(BasePolicy):
         this_nobs = dict_apply(nobs, 
             lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]).to(self.device))
         if self.use_aug and training:
-            for key in list(this_nobs.keys()):
-                if ('image' in key.lower() or 'rgb' in key.lower()) and this_nobs[key].dtype == torch.float32:
-                    this_nobs[key] = self.aug(this_nobs[key].float())
-                elif ('image' in key.lower() or 'rgb' in key.lower()):
-                    this_nobs[key] = self.aug(this_nobs[key].float())
+            self._augment_rgb_obs(this_nobs)
         return this_nobs
     def compute_loss(self, batch, fix_encoder=False, online=False):
         # normalize input
@@ -837,11 +826,7 @@ class RL1002D(BasePolicy):
                 lambda x: x[:,:self.n_obs_steps,...].reshape(-1,*x.shape[2:]).to(self.device))
             # import pdb; pdb.set_trace()    
             if self.use_aug:
-                for key in list(this_nobs.keys()):
-                    if ('image' in key.lower() or 'rgb' in key.lower()) and this_nobs[key].dtype == torch.float32:
-                        this_nobs[key] = self.aug(this_nobs[key].float())
-                    elif ('image' in key.lower() or 'rgb' in key.lower()):
-                        this_nobs[key] = self.aug(this_nobs[key].float())
+                self._augment_rgb_obs(this_nobs)
             if False:
                 self.save_images_from_nobs(this_nobs, save_dir="debug_images", prefix="training_batch")
 
@@ -875,11 +860,7 @@ class RL1002D(BasePolicy):
             # reshape B, T, ... to B*T
             this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]).to(self.device))
             if self.use_aug:
-                for key in list(this_nobs.keys()):
-                    if ('image' in key.lower() or 'rgb' in key.lower()) and this_nobs[key].dtype == torch.float32:
-                        this_nobs[key] = self.aug(this_nobs[key].float())
-                    elif ('image' in key.lower() or 'rgb' in key.lower()):
-                        this_nobs[key] = self.aug(this_nobs[key].float())
+                self._augment_rgb_obs(this_nobs)
 
             if False:
                 self.save_images_from_nobs(this_nobs, save_dir="debug_images", prefix="training_batch_else")
