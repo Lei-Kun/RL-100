@@ -2,6 +2,7 @@ from datetime import datetime
 import os
 import time
 
+import cv2
 import numpy as np
 import torch
 import tqdm
@@ -33,6 +34,8 @@ class PegRunner(BaseRunner):
         with_image=False,
         with_pointcloud=True,
         image_keys=None,
+        external_image_size=None,
+        wrist_image_size=None,
         fake_env=False,
         num_points=1024,
         state_shape=7,
@@ -48,6 +51,8 @@ class PegRunner(BaseRunner):
         success_reward=2.0,
         failure_reward=-1.0,
         require_reset_confirmation=True,
+        save_policy_input_images=False,
+        max_saved_policy_input_steps=20,
     ):
         super().__init__(output_dir)
         self.eval_episodes = int(eval_episodes)
@@ -60,6 +65,9 @@ class PegRunner(BaseRunner):
         self.with_image = bool(with_image)
         self.with_pointcloud = bool(with_pointcloud)
         self.image_keys = tuple(image_keys or ['image'])
+        self.save_policy_input_images = bool(save_policy_input_images)
+        self.max_saved_policy_input_steps = int(max_saved_policy_input_steps)
+        self._saved_policy_input_steps = 0
         self.handles_keyboard_result = True
         self.logger_util_test = logger_util.LargestKRecorder(K=3)
         self.logger_util_test10 = logger_util.LargestKRecorder(K=5)
@@ -80,6 +88,8 @@ class PegRunner(BaseRunner):
                 with_image=self.with_image,
                 with_pointcloud=self.with_pointcloud,
                 image_keys=self.image_keys,
+                external_image_size=external_image_size,
+                wrist_image_size=wrist_image_size,
                 external_camera_serial=external_camera_serial,
                 wrist_camera_serial=wrist_camera_serial,
                 camera_color_fps=camera_color_fps,
@@ -179,6 +189,11 @@ class PegRunner(BaseRunner):
 
             while True:
                 policy_input = self._make_policy_input(policy_obs, policy.device)
+                self._save_policy_input_images(
+                    policy_input,
+                    episode_idx=episode_idx,
+                    decision_idx=step_count // max(self.n_action_steps, 1),
+                )
                 with torch.inference_mode():
                     action_result = predict(policy_input)
                 actions = self._as_action_chunk(action_result)
@@ -245,6 +260,37 @@ class PegRunner(BaseRunner):
                 obs[image_key][-self.n_obs_steps:], device=device, dtype=torch.float32
             ).unsqueeze(0)
         return policy_input
+
+    def _save_policy_input_images(self, policy_input, episode_idx, decision_idx):
+        """Save the exact pre-encoder RGB tensors supplied to the policy."""
+        if (
+            not self.save_policy_input_images
+            or not self.with_image
+            or self._saved_policy_input_steps >= self.max_saved_policy_input_steps
+        ):
+            return
+
+        save_dir = os.path.join(self.output_dir, 'policy_input_images')
+        os.makedirs(save_dir, exist_ok=True)
+        for image_key in self.image_keys:
+            images = policy_input[image_key][0].detach().cpu().numpy()
+            for history_idx, image in enumerate(images):
+                image = np.moveaxis(image, 0, -1)
+                image = np.clip(np.rint(image * 255.0), 0, 255).astype(np.uint8)
+                filename = (
+                    f'episode_{episode_idx:03d}_decision_{decision_idx:04d}_'
+                    f'history_{history_idx:02d}_{image_key}.png'
+                )
+                output_path = os.path.join(save_dir, filename)
+                if not cv2.imwrite(
+                    output_path,
+                    cv2.cvtColor(image, cv2.COLOR_RGB2BGR),
+                ):
+                    raise IOError(f'Failed to save policy input image: {output_path}')
+
+        self._saved_policy_input_steps += 1
+        if self._saved_policy_input_steps == 1:
+            cprint(f'Saving policy input images to {save_dir}', 'cyan')
 
     def _as_action_chunk(self, action_result):
         if not isinstance(action_result, dict) or 'action' not in action_result:

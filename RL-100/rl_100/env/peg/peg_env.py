@@ -59,7 +59,7 @@ class PegEnv:
 
     # Reset pose and control frequency used by teleop_original.py.
     INIT_JOINTS = np.array([2.6, -17.6, -38.0, 1.7, 58.3, -88.9])
-    EXTERNAL_CROP_XYXY = (275, 100, 700, 540)
+    EXTERNAL_CROP_XYXY = (205, 100, 700, 540)
 
     def __init__(
         self,
@@ -70,6 +70,8 @@ class PegEnv:
         with_image=False,
         with_pointcloud=True,
         image_keys=None,
+        external_image_size=None,
+        wrist_image_size=None,
         external_camera_serial=None,
         wrist_camera_serial=None,
         camera_color_fps=15,
@@ -89,6 +91,15 @@ class PegEnv:
         self.image_keys = tuple(image_keys or ['image'])
         if len(self.image_keys) not in (1, 2):
             raise ValueError('PegEnv supports one or two image keys')
+        self.image_sizes = {
+            self.image_keys[0]: int(
+                image_size if external_image_size is None else external_image_size
+            )
+        }
+        if len(self.image_keys) == 2:
+            self.image_sizes[self.image_keys[1]] = int(
+                image_size if wrist_image_size is None else wrist_image_size
+            )
         if self.with_image and len(self.image_keys) == 2 and wrist_camera_serial is None:
             raise ValueError('wrist_camera_serial is required for two image views')
         self.max_episode_steps = int(max_episode_steps)
@@ -148,7 +159,7 @@ class PegEnv:
             image_key: spaces.Box(
                 0,
                 1,
-                shape=(3, self.image_size, self.image_size),
+                shape=(3, self.image_sizes[image_key], self.image_sizes[image_key]),
                 dtype=np.float32,
             )
             for image_key in self.image_keys
@@ -215,31 +226,40 @@ class PegEnv:
             'ee_pose': np.concatenate([tcp_pose, [gripper_state]]).astype(np.float32),
             'point_cloud': np.asarray(point_cloud, dtype=np.float32),
         }
-        zero_image = np.zeros((3, self.image_size, self.image_size), dtype=np.float32)
+        external_size = self.image_sizes[self.image_keys[0]]
+        zero_external = np.zeros((3, external_size, external_size), dtype=np.float32)
         if self.with_image and external_frame['color'] is not None:
             external_crop = self.EXTERNAL_CROP_XYXY if len(self.image_keys) == 2 else None
             obs[self.image_keys[0]] = self._prepare_image(
-                external_frame['color'], crop_xyxy=external_crop
+                external_frame['color'],
+                image_size=external_size,
+                crop_xyxy=external_crop,
             )
         else:
-            obs[self.image_keys[0]] = zero_image.copy()
+            obs[self.image_keys[0]] = zero_external
         if len(self.image_keys) == 2:
             wrist_frame = frame['wrist']
+            wrist_size = self.image_sizes[self.image_keys[1]]
             if wrist_frame is not None and wrist_frame['color'] is not None:
-                obs[self.image_keys[1]] = self._prepare_image(wrist_frame['color'])
+                obs[self.image_keys[1]] = self._prepare_image(
+                    wrist_frame['color'], image_size=wrist_size
+                )
             else:
-                obs[self.image_keys[1]] = zero_image.copy()
+                obs[self.image_keys[1]] = np.zeros(
+                    (3, wrist_size, wrist_size), dtype=np.float32
+                )
         return obs
 
-    def _prepare_image(self, color_image, crop_xyxy=None):
+    def _prepare_image(self, color_image, crop_xyxy=None, image_size=None):
         """Match the RGB preprocessing used by data_prepare_peg.py."""
+        image_size = self.image_size if image_size is None else int(image_size)
         image = color_image
         if crop_xyxy is not None:
             left, top, right, bottom = crop_xyxy
             image = image[top:bottom, left:right]
         image = cv2.resize(
             image,
-            (self.image_size, self.image_size),
+            (image_size, image_size),
             interpolation=cv2.INTER_AREA,
         )
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -305,7 +325,8 @@ class PegEnv:
         return bool(manual_done), False
 
     def render(self, mode='rgb_array'):
-        return np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
+        image_size = self.image_sizes[self.image_keys[0]]
+        return np.zeros((image_size, image_size, 3), dtype=np.uint8)
 
     def close(self):
         if self._closed:
