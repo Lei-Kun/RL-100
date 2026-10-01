@@ -62,7 +62,7 @@ def main():
     torch.manual_seed(args.seed)
     ppo = S.build_ppo(cfg, policy)
     rec['optimizer_actor_num_tensors'] = sum(len(g['params']) for g in ppo.optimizer_actor.param_groups)
-    replay = S.FakeReplay(cfg, seed=7)
+    replay = S.FakeReplay(cfg, seed=7, policy=policy)   # rollout log-probs so every denoise step has gradient
     torch.manual_seed(args.seed + 1)
     out = ppo.dp_align_update_no_share(replay, total_steps=1)
     rec['dp_align_returns'] = [float(x) for x in out]

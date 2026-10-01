@@ -4,6 +4,7 @@ CPU only. Every shape / horizon / key is derived from the composed Hydra config 
 helpers work for any 2D task config; the defaults below are a tiny synthetic setting
 (32x32 rgb, 64-point clouds, 3 flow steps) chosen for speed, not for realism.
 """
+import copy
 import hashlib
 import os
 import sys
@@ -151,9 +152,11 @@ class TinyCritic(nn.Module):
         return self.lin(x.reshape(-1, self.n_obs_steps * x.shape[-1]))
 
 
-def build_ppo(cfg, policy, critic=None):
-    """Construct BehaviorProximalPolicyOptimization the way train_real.py does and move it online."""
+def build_ppo(cfg, policy, critic=None, seed=0):
+    """Construct BehaviorProximalPolicyOptimization the way train_real.py does and move it online.
+    The global RNG is seeded before the (random-init) TinyCritic so two builds are comparable."""
     from rl_100.unidpg.uni_ppo import BehaviorProximalPolicyOptimization
+    torch.manual_seed(seed)
     ppo = BehaviorProximalPolicyOptimization(
         policy=policy,
         device=torch.device(cfg.training.device),
@@ -188,9 +191,13 @@ def build_ppo(cfg, policy, critic=None):
 
 class FakeReplay:
     """Stand-in for the online ReplayBuffer: numpy_to_tensor() -> (s, a, a_logprob, r, s_, dw, done)
-    with a (B, T+1, H, Da) and a_logprob (B, T, H, Da), T = flow_inference_steps, H = horizon - n_obs_steps + 1."""
+    with a (B, T+1, H, Da) and a_logprob (B, T, H, Da), T = flow_inference_steps, H = horizon - n_obs_steps + 1.
 
-    def __init__(self, cfg, B=None, seed=7):
+    With ``policy`` given, a / a_logprob come from the policy's own rollout
+    (all_step_action_logprob) so PPO ratios sit near 1 and every denoise step carries gradient;
+    with random a / a_logprob the ratios saturate the clip and only step 0 contributes."""
+
+    def __init__(self, cfg, B=None, seed=7, policy=None):
         B = int(cfg.ppo.batch_size) if B is None else int(B)
         g = torch.Generator().manual_seed(seed)
         meta = shape_meta(cfg)
@@ -199,8 +206,18 @@ class FakeReplay:
         H = int(cfg.horizon) - int(cfg.n_obs_steps) + 1
         self.s = random_batch(cfg, B, seed=seed)['obs']
         self.s_ = random_batch(cfg, B, seed=seed + 1)['obs']
-        self.a = torch.randn(B, T + 1, H, Da, generator=g)
-        self.a_logprob = torch.randn(B, T, H, Da, generator=g)
+        if policy is None:
+            self.a = torch.randn(B, T + 1, H, Da, generator=g)
+            self.a_logprob = torch.randn(B, T, H, Da, generator=g)
+        else:
+            rng_state = torch.get_rng_state()
+            torch.manual_seed(seed)
+            with torch.no_grad():
+                _, all_x, all_logprob = policy.all_step_action_logprob(copy.deepcopy(self.s))
+            torch.set_rng_state(rng_state)
+            self.a = all_x.transpose(0, 1).contiguous()
+            self.a_logprob = all_logprob.transpose(0, 1).contiguous()
+            assert self.a.shape == (B, T + 1, H, Da) and self.a_logprob.shape == (B, T, H, Da)
         self.r = torch.rand(B, 1, generator=g)
         self.dw = torch.zeros(B, 1)
         self.done = torch.zeros(B, 1)
