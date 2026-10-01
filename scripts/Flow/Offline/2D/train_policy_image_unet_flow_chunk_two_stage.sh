@@ -11,6 +11,8 @@ set -euo pipefail
 
 DEBUG=${DEBUG:-False}
 save_ckpt=${save_ckpt:-True}
+# Lighting augmentation (offline SFT). Unset => no override is appended (baseline command line).
+LIGHTING_AUG=${LIGHTING_AUG:-}
 
 alg_name=${1:?alg_name is required}
 task_name=${2:?task_name is required}
@@ -157,6 +159,10 @@ get_common_params() {
     local critic_q_layer_norm=${9:-False}
     local critic_action_embed_layer_norm=${10:-False}
     local dynamics_action_embed_layer_norm=${11:-False}
+    local lighting_override=""
+    if [ -n "${LIGHTING_AUG}" ]; then
+        lighting_override="policy.lighting_aug.enabled=${LIGHTING_AUG}"
+    fi
 
     echo "task=${task_name} \
         hydra.run.dir=${run_dir} \
@@ -257,7 +263,7 @@ get_common_params() {
         action_recon_beta=${ACTION_RECON_BETA} \
         chunk_vdelta_gae_n_rollout=${CHUNK_VDELTA_GAE_N_ROLLOUT} \
         chunk_vdelta_gae_lambda=${CHUNK_VDELTA_GAE_LAMBDA} \
-        chunk_vdelta_gae_chunk_source=${CHUNK_VDELTA_GAE_CHUNK_SOURCE}"
+        chunk_vdelta_gae_chunk_source=${CHUNK_VDELTA_GAE_CHUNK_SOURCE}${lighting_override:+ ${lighting_override}}"
 }
 
 base_stage1_complete() {

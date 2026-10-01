@@ -284,6 +284,69 @@ class MultiImageObsEncoder(ModuleAttrMixin):
         kl_loss = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1).mean()
         return feature, kl_loss
 
+    # ------------------------------------------------------------------ backbone / head split
+    # Used by the online prediction-consistency auxiliary (uni_ppo.py). Additive only:
+    # forward / Recon_VIB_loss / output_shape are untouched.
+    def _require_per_key_models(self):
+        if self.share_rgb_model:
+            raise NotImplementedError('share_rgb_model=True is not supported')
+
+    def backbone_parameters(self):
+        """Parameters of the per-camera rgb backbones only (no VIB heads, no decoders)."""
+        self._require_per_key_models()
+        return self.key_model_map.parameters()
+
+    def freeze_backbone(self):
+        """Freeze the rgb backbones in place; returns the number of frozen tensors.
+        Backbones are also switched to eval() (no BN running buffers exist, see F7)."""
+        self._require_per_key_models()
+        n = 0
+        for p in self.backbone_parameters():
+            p.requires_grad_(False)
+            p.grad = None
+            n += 1
+        self.key_model_map.eval()
+        return n
+
+    def has_trainable_params(self):
+        """True if any non-empty parameter still requires grad (ignores ModuleAttrMixin's
+        zero-element _dummy_variable, which is never optimised)."""
+        self._require_per_key_models()
+        return any(p.requires_grad and p.numel() > 0 for p in self.parameters())
+
+    def backbone_forward(self, obs_dict):
+        """rgb key -> backbone feature (B*n, D_key), including _apply_transform(deterministic=True).
+        No VIB, no low_dim."""
+        self._require_per_key_models()
+        feats = {}
+        for key in self.rgb_keys:
+            img = obs_dict[key]
+            if img.shape[1] != 3:
+                img = einops.rearrange(img, 'b h w c -> b c h w')
+            assert img.shape[1:] == self.key_shape_map[key]
+            img = self._apply_transform(key, img, deterministic=True)
+            feats[key] = self.key_model_map[key](img)
+        return feats
+
+    def head_forward(self, backbone_feats, obs_dict):
+        """Same concatenation order as forward(): rgb_keys (after VIB) -> low_dim_keys.
+        VIB determinism is the caller's responsibility (RL1002D._deterministic_obs_encoder)."""
+        self._require_per_key_models()
+        features = []
+        batch_size = None
+        for key in self.rgb_keys:
+            f = backbone_feats[key]
+            batch_size = f.shape[0]
+            if self.use_vib:
+                f, _ = self._vib_forward(f, self.vib_heads[key])
+            features.append(f)
+        if self.use_agent_pos:
+            for key in self.low_dim_keys:
+                data = obs_dict[key]
+                assert data.shape[0] == batch_size and data.shape[1:] == self.key_shape_map[key]
+                features.append(data.to(features[0].device) if features else data)
+        return torch.cat(features, dim=-1)
+
     def forward(self, obs_dict, deterministic=False):
         batch_size = None
         features = list()
