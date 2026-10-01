@@ -136,7 +136,9 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
             vs, vs_: 当前状态和下一状态的critic值
         """
         batch_size = s['agent_pos'].shape[0]
-        chunk_size = min(256, batch_size)  # 可以根据显存情况调整chunk_size
+        configured_chunk_size = int(
+            getattr(self.args, 'critic_value_chunk_size', 256))
+        chunk_size = min(max(1, configured_chunk_size), batch_size)
         num_chunks = (batch_size + chunk_size - 1) // chunk_size
         vs_list, vs_list_ = [], []
         
@@ -144,8 +146,10 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
             start_idx = i * chunk_size
             end_idx = min((i + 1) * chunk_size, batch_size)
             
-            s_chunk = dict_apply(s, lambda x: x[start_idx:end_idx])
-            s_chunk_ = dict_apply(s_, lambda x: x[start_idx:end_idx])
+            s_chunk = dict_apply(
+                s, lambda x: x[start_idx:end_idx].to(self._device))
+            s_chunk_ = dict_apply(
+                s_, lambda x: x[start_idx:end_idx].to(self._device))
             
             if use_obs2latent:
                 critic_s_chunk = self._policy.obs2latent(s_chunk)
@@ -1099,7 +1103,11 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
         if gradient_steps <= 0:
             return 0.0
 
-        s, _, _, r, s_, dw, done = replay_buffer.numpy_to_tensor()
+        s, _, _, r, s_, dw, done = replay_buffer.numpy_to_tensor(
+            device='cpu')
+        r = r.to(self._device)
+        dw = dw.to(self._device)
+        done = done.to(self._device)
         with torch.no_grad():
             if self.args.share_encoder:
                 vs, vs_ = self._compute_critic_values_in_chunks(
@@ -1128,7 +1136,9 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
         for _ in tqdm(range(gradient_steps), desc='Critic warmup'):
             index = torch.randint(
                 batch_size, (mini_batch_size,), device=self._device)
-            state = dict_apply(s, lambda x: x[index])
+            index_cpu = index.cpu()
+            state = dict_apply(
+                s, lambda x: x[index_cpu].to(self._device))
 
             if self.args.share_encoder:
                 with torch.no_grad():
@@ -1177,7 +1187,16 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
                 loss_metric = self._policy.train_align(replay_buffer, self.optimizer_actor, self.args.fix_encoder, self.args.batch_size, iterations = self.args.iterations, mini_batch_size=self.args.mini_batch_size)
         else:
             loss_metric['bc_loss'] = 0
-        s, a, a_logprob, r, s_, dw, done = replay_buffer.numpy_to_tensor()  # Get training data
+        # Keep high-resolution replay observations on CPU. Moving all current
+        # and next images for the full rollout to CUDA creates a multi-GB
+        # allocation before the first PPO mini-batch.
+        s, a, a_logprob, r, s_, dw, done = replay_buffer.numpy_to_tensor(
+            device='cpu')
+        a = a.to(self._device)
+        a_logprob = a_logprob.to(self._device)
+        r = r.to(self._device)
+        dw = dw.to(self._device)
+        done = done.to(self._device)
         a, a_logprob = a.transpose(0,1), a_logprob.transpose(0, 1)
 
         if precomputed is not None:
@@ -1213,7 +1232,8 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
             # Random sampling and no repetition. 'False' indicates that training will continue even if the number of samples in the last time is less than mini_batch_size
             for index in BatchSampler(SubsetRandomSampler(range(self.args.batch_size)), self.args.mini_batch_size, False):
                 actions = a[:, index, :]
-                state = dict_apply(s, lambda x: x[index])
+                state = dict_apply(
+                    s, lambda x: x[index].to(self._device))
                 local_cond = None
                 a_logprob_old = a_logprob[:, index, :]
                 approx_kl_divs = []

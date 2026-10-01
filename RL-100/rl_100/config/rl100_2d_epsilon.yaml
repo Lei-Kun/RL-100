@@ -27,6 +27,7 @@ ft_all_actions: True
 eval: False
 offline: False
 online: False
+use_checkpoint_normalizer: True
 num_inference_steps: 10
 cm_inference_steps: 1
 feature_type: '2D' # 2D, 3D, or 2D3D

@@ -9,7 +9,7 @@ shape_meta: &shape_meta
       shape: [3, 224, 224]
       type: rgb
     wrist_img:
-      shape: [3, 224, 224]
+      shape: [3, 128, 128]
       type: rgb
     point_cloud:
       shape: [1024, 3]
@@ -35,7 +35,7 @@ env_runner:
   with_pointcloud: false
   image_keys: [external_img, wrist_img]
   external_image_size: 224
-  wrist_image_size: 224
+  wrist_image_size: 128
   external_camera_serial: f1380379
   wrist_camera_serial: '143322071911'
   camera_color_fps: 30
@@ -52,7 +52,7 @@ env_runner:
 
 norm_dataset: &dataset
   _target_: rl_100.dataset.pusht_dataset.PushTDataset
-  zarr_path: /data/hdd2/xarm_teleop/data/data_peg_l515_224_d435_224_0924.zarr
+  zarr_path: /data/hdd2/xarm_teleop/data/data_peg_l515_224_d435_128_0926.zarr
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
