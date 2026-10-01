@@ -48,7 +48,7 @@ env_runner:
 
 norm_dataset: &dataset
   _target_: rl_100.dataset.pusht_dataset.PushTDataset
-  zarr_path: /cephfs/lk/RL-100/RL-100/data/data_peg_l515_224_d435_128_0924.zarr
+  zarr_path: /cephfs/lk/RL-100/RL-100/data/data_peg_l515_224_d435_128_0926.zarr
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
