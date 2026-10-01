@@ -26,6 +26,8 @@ from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 from tqdm import tqdm
 
 from rl_100.model.common.aug import RandomShiftsAug
+from rl_100.model.common.photometric_aug import PhotometricAug
+from omegaconf import OmegaConf, DictConfig
 
 # 添加用于图片可视化和保存的导入
 import os
@@ -99,6 +101,7 @@ class RL1002D(BasePolicy):
             flow_cps_logprob_mode: str = 'gaussian',
             flow_distill_inference_steps: int = 1,
             flow_distill_teacher_steps: int = 10,
+            lighting_aug=None,
             # parameters passed to step
             **kwargs):
         super().__init__()
@@ -272,6 +275,15 @@ class RL1002D(BasePolicy):
         # add aug obs model
         self.use_aug = use_aug
         self.aug = RandomShiftsAug(pad=4)
+        # lighting (photometric) aug: default off; only built when cfg.enabled is true.
+        # PhotometricAug has no parameters/buffers, so state_dict keys are unchanged.
+        self.lighting_aug = None
+        if lighting_aug is not None:
+            la_cfg = lighting_aug if isinstance(lighting_aug, dict) else OmegaConf.to_container(lighting_aug, resolve=True)
+            if bool(la_cfg.get('enabled', False)):
+                self.lighting_aug = PhotometricAug(la_cfg)
+                cprint(f'[RL1002D] lighting_aug enabled: {la_cfg}', 'yellow')
+        self.last_lighting_aug_stats = {}
         # get action
         if not self.no_pre_action:
             start = 0
@@ -288,6 +300,63 @@ class RL1002D(BasePolicy):
         for key in self.rgb_obs_keys:
             if key in obs_dict:
                 obs_dict[key] = self.aug(obs_dict[key].float())
+
+    def _apply_lighting_aug(self, obs_dict, batch_size):
+        """Photometric aug on flattened [0,1] rgb frames. Gated by caller (use_aug).
+
+        Gating semantics: lighting aug is active only when ``use_aug=True`` AND
+        ``lighting_aug.enabled=True``; it is applied after RandomShiftsAug and
+        before the encoder, in ``compute_loss`` only. F1 = crop + lighting; running
+        lighting without crop is not supported.
+        """
+        lighting_aug = getattr(self, 'lighting_aug', None)   # getattr: dill-restored old policies lack the attr
+        if lighting_aug is None:
+            return
+        _, stats = lighting_aug(obs_dict, self.rgb_obs_keys, batch_size)
+        self.last_lighting_aug_stats = stats
+
+    @torch.no_grad()
+    def build_consistency_views(self, obs, shift_mask, lighting_profile='mild',
+                                photometric=None, generator=None):
+        """Build (clean, aug) views for the online prediction-consistency auxiliary.
+
+        obs: raw obs dict in the same format as ``state`` in dp_align_update_no_share, (B, To, ...).
+        shift_mask: (B,) bool; True samples get RandomShiftsAug applied to BOTH views (same shift).
+        Returns (clean, aug, stats): two flattened this_nobs dicts whose rgb tensors are NCHW
+        float32 in [0,1]; all non-rgb keys share the same tensor objects.
+        """
+        photometric = photometric if photometric is not None else getattr(self, 'lighting_aug', None)
+        assert photometric is not None, 'build_consistency_views requires a PhotometricAug instance'
+        nobs = self.normalizer.normalize(obs)
+        if self.w_pc and not self.use_pc_color and 'point_cloud' in nobs:
+            nobs['point_cloud'] = nobs['point_cloud'][..., :3]
+        B = nobs['agent_pos'].shape[0]
+        To = self.n_obs_steps
+        clean = dict_apply(nobs, lambda x: x[:, :To, ...].reshape(-1, *x.shape[2:]).to(self.device))
+        shift_mask = shift_mask.to(self.device)
+        if bool(shift_mask.any()):
+            frame_mask = shift_mask.repeat_interleave(To).view(-1, 1, 1, 1)
+            for key in self.rgb_obs_keys:
+                img = clean[key].float()
+                if img.shape[1] != 3 and img.shape[-1] == 3:
+                    img = img.permute(0, 3, 1, 2).contiguous()
+                shifted = self.aug(img, generator=generator).permute(0, 3, 1, 2).contiguous()  # aug returns NHWC
+                clean[key] = torch.where(frame_mask, shifted, img)
+        else:
+            for key in self.rgb_obs_keys:
+                img = clean[key].float()
+                if img.shape[1] != 3 and img.shape[-1] == 3:
+                    img = img.permute(0, 3, 1, 2).contiguous()
+                clean[key] = img
+        aug = dict(clean)  # shallow copy; photometric assigns new tensors for rgb keys, clean is untouched
+        aug, stats = photometric(aug, self.rgb_obs_keys, B, profile=lighting_profile, generator=generator)
+        return clean, aug, stats
+
+    def encode_flat(self, this_nobs):
+        """Run obs_encoder on a flattened this_nobs. Caller decides grad / deterministic context."""
+        if hasattr(self.obs_encoder, '_apply_transform'):
+            return self.obs_encoder(this_nobs, deterministic=True)
+        return self.obs_encoder(this_nobs)
 
     def get_unet_timesteps(self, timesteps):
         """Convert scheduler timesteps to UNet-compatible integer timesteps.
@@ -827,6 +896,7 @@ class RL1002D(BasePolicy):
             # import pdb; pdb.set_trace()    
             if self.use_aug:
                 self._augment_rgb_obs(this_nobs)
+                self._apply_lighting_aug(this_nobs, batch_size)
             if False:
                 self.save_images_from_nobs(this_nobs, save_dir="debug_images", prefix="training_batch")
 
@@ -861,6 +931,7 @@ class RL1002D(BasePolicy):
             this_nobs = dict_apply(nobs, lambda x: x.reshape(-1, *x.shape[2:]).to(self.device))
             if self.use_aug:
                 self._augment_rgb_obs(this_nobs)
+                self._apply_lighting_aug(this_nobs, batch_size)
 
             if False:
                 self.save_images_from_nobs(this_nobs, save_dir="debug_images", prefix="training_batch_else")
@@ -949,6 +1020,9 @@ class RL1002D(BasePolicy):
                 'kl_loss': loss_items.get('kl_loss', 0.0),
                 'recon_loss': loss_items.get('recon_loss', 0.0),
             }
+        _la_stats = getattr(self, 'last_lighting_aug_stats', {})
+        if getattr(self, 'lighting_aug', None) is not None and self.use_aug and _la_stats:
+            loss_dict.update({f'lighting_aug/{k}': float(v) for k, v in _la_stats.items()})
 
 
         # print(f"t2-t1: {t2-t1:.3f}")

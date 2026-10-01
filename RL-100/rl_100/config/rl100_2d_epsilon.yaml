@@ -234,6 +234,18 @@ policy:
     normal_channel: False
 
   use_aug: False
+  lighting_aug:
+    enabled: false
+    profile_prob: {identity: 0.25, mild: 0.50, wide: 0.25}
+    white_balance_p: 0.5
+    contrast_p: 0.3
+    smooth_field_p_given_wide: 0.2
+    share_profile_across_views: true
+    share_params_across_history: true
+    field_grid: 4
+    mild: {gain: [0.85, 1.15], gamma: [0.90, 1.10], rgb_gain: [0.95, 1.05], contrast: [0.90, 1.10]}
+    wide: {gain: [0.70, 1.40], gamma: [0.80, 1.25], rgb_gain: [0.90, 1.10], contrast: [0.80, 1.20], smooth_field: [0.85, 1.15]}
+    log_stats: true
 
 # 定义不同的编码器配置
 encoders:
@@ -548,6 +560,16 @@ ppo:
   idql_rollout: False
   force_stochastic_online: True
   per_step_recon: True
+  freeze_rgb_backbone: false
+  aux_consistency:
+    enabled: false
+    batch_fraction: 0.5
+    random_shift_prob: 0.5
+    lighting_profile: mild
+    lambda_actor: 0.01
+    warmup_steps: 100
+    grad_log_every: 0
+    log_post_update_kl: false
 online_v:
   state_dim: null
   v_hidden_width: 256
