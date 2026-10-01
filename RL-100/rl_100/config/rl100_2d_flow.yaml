@@ -264,7 +264,7 @@ policy:
   use_aug: False
   lighting_aug:
     enabled: false
-    profile_prob: {identity: 0.25, mild: 0.50, wide: 0.25}
+    profile_prob: {identity: 0.25, mild: 0.60, wide: 0.15}
     white_balance_p: 0.5
     contrast_p: 0.3
     smooth_field_p_given_wide: 0.2
