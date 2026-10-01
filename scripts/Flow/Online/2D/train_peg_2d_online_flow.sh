@@ -12,6 +12,11 @@ set -euo pipefail
 
 DEBUG=${DEBUG:-False}
 save_ckpt=${save_ckpt:-True}
+# Lighting-aug online switches. Unset => nothing is appended to COMMON_ARGS (baseline command line).
+FREEZE_RGB_BACKBONE=${FREEZE_RGB_BACKBONE:-}
+AUX_CONSISTENCY=${AUX_CONSISTENCY:-}
+AUX_LAMBDA=${AUX_LAMBDA:-}
+AUX_PROFILE=${AUX_PROFILE:-}
 
 alg_name=${1:?alg_name is required}
 task_name=${2:-peg_2d}
@@ -215,6 +220,20 @@ COMMON_ARGS=(
     dataloader.num_workers=0
     val_dataloader.num_workers=0
 )
+
+# Optional lighting-aug overrides (appended only when the env var is set; distill ignores ppo.*)
+if [ -n "${FREEZE_RGB_BACKBONE}" ]; then
+    COMMON_ARGS+=(ppo.freeze_rgb_backbone=${FREEZE_RGB_BACKBONE})
+fi
+if [ -n "${AUX_CONSISTENCY}" ]; then
+    COMMON_ARGS+=(ppo.aux_consistency.enabled=${AUX_CONSISTENCY})
+fi
+if [ -n "${AUX_LAMBDA}" ]; then
+    COMMON_ARGS+=(ppo.aux_consistency.lambda_actor=${AUX_LAMBDA})
+fi
+if [ -n "${AUX_PROFILE}" ]; then
+    COMMON_ARGS+=(ppo.aux_consistency.lighting_profile=${AUX_PROFILE})
+fi
 
 offline_distilled_path=${stage1_run_dir}/best/last/distilled_model.pt
 if [ ! -f "${offline_distilled_path}" ]; then
