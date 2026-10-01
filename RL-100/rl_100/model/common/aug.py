@@ -7,7 +7,7 @@ class RandomShiftsAug(nn.Module):
         super().__init__()
         self.pad = pad
 
-    def forward(self, x):
+    def forward(self, x, generator=None):
         # import pdb; pdb.set_trace()
         if x.size(3) != 3:
             x = x.permute(0, 2, 3, 1)  # to [n, h, w, c]
@@ -49,13 +49,15 @@ class RandomShiftsAug(nn.Module):
                                2 * self.pad + 1,
                                size=(n, 1, 1, 1),
                                device=x.device,
-                               dtype=x.dtype) * 2.0 / (w + 2 * self.pad)
+                               dtype=x.dtype,
+                               generator=generator) * 2.0 / (w + 2 * self.pad)
         
         shift_y = torch.randint(0,
                                2 * self.pad + 1,
                                size=(n, 1, 1, 1),
                                device=x.device,
-                               dtype=x.dtype) * 2.0 / (h + 2 * self.pad)
+                               dtype=x.dtype,
+                               generator=generator) * 2.0 / (h + 2 * self.pad)
         
         shift = torch.cat([shift_x, shift_y], dim=3)  # (n, 1, 1, 2)
 

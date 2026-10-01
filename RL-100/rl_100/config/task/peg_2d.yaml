@@ -34,10 +34,14 @@ env_runner:
   with_image: true
   with_pointcloud: false
   image_keys: [external_img, wrist_img]
+  external_image_size: 224
+  wrist_image_size: 224
   external_camera_serial: f1380379
   wrist_camera_serial: '143322071911'
-  camera_color_fps: 15
+  camera_color_fps: 30
   camera_depth_fps: 30
+  save_policy_input_images: False
+  max_saved_policy_input_steps: 20
   fake_env: true
   num_points: 1024
   state_shape: 7

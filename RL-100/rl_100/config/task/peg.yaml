@@ -36,7 +36,7 @@ env_runner:
   failure_reward: -1.0
 norm_dataset:
   _target_: rl_100.dataset.pusht_dataset.PushTDataset
-  zarr_path: /data/hdd2/xarm_teleop/data/data_peg.zarr
+  zarr_path: /data/hdd2/xarm_teleop/data_3d/data_peg.zarr
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
@@ -49,7 +49,7 @@ norm_dataset:
   derive_next_action: True
 dataset:
   _target_: rl_100.dataset.pusht_dataset.PushTDataset
-  zarr_path: /data/hdd2/xarm_teleop/data/data_peg.zarr
+  zarr_path: /data/hdd2/xarm_teleop/data_3d/data_peg.zarr
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
@@ -62,7 +62,7 @@ dataset:
   derive_next_action: True
 critic_dataset:
   _target_: rl_100.dataset.pusht_dataset.PushTDataset
-  zarr_path: /data/hdd2/xarm_teleop/data/data_peg.zarr
+  zarr_path: /data/hdd2/xarm_teleop/data_3d/data_peg.zarr
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
@@ -75,7 +75,7 @@ critic_dataset:
   derive_next_action: True
 finetune_dataset:
   _target_: rl_100.dataset.pusht_dataset.PushTDataset
-  zarr_path: /data/hdd2/xarm_teleop/data/data_peg.zarr
+  zarr_path: /data/hdd2/xarm_teleop/data_3d/data_peg.zarr
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
@@ -88,7 +88,7 @@ finetune_dataset:
   derive_next_action: True
 scale_dataset:
   _target_: rl_100.dataset.pusht_dataset.PushTDataset
-  zarr_path: /data/hdd2/xarm_teleop/data/data_peg.zarr
+  zarr_path: /data/hdd2/xarm_teleop/data_3d/data_peg.zarr
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}

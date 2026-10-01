@@ -10,16 +10,24 @@ class ReplayBuffer:
                 self.use_imagin_robot = True
                 break
         self.wo_visual = wo_visual
-        if shape_info['obs']['image'][-1] == 3:
-            shape_info['obs']['image'] =  (
-                shape_info['obs']['image'][0], 
-                shape_info['obs']['image'][-1],
-                shape_info['obs']['image'][1], 
-                shape_info['obs']['image'][2], 
-            )
+        self.image_shapes = {}
+        for key, shape in shape_info['obs'].items():
+            shape = tuple(shape)
+            if len(shape) == 4 and (shape[1] == 3 or shape[-1] == 3):
+                if shape[-1] == 3 and shape[1] != 3:
+                    shape = (shape[0], shape[-1], shape[1], shape[2])
+                self.image_shapes[key] = shape
+        self.image_keys = list(self.image_shapes)
+        self.use_legacy_image = 'image' in self.image_shapes
         if not wo_visual:   
             self.point_cloud = np.zeros((args.batch_size, *shape_info['obs']['point_cloud']))
-            self.image = np.zeros((args.batch_size, *shape_info['obs']['image']))
+            if self.use_legacy_image:
+                self.image = np.zeros((args.batch_size, *self.image_shapes['image']))
+            else:
+                self.images = {
+                    key: np.zeros((args.batch_size, *shape), dtype=np.float32)
+                    for key, shape in self.image_shapes.items()
+                }
             if self.use_imagin_robot:
                 self.imagin_robot = np.zeros((args.batch_size, *shape_info['obs']['imagin_robot']))
         self.agent_pos = np.zeros((args.batch_size, *shape_info['obs']['agent_pos']))
@@ -28,7 +36,13 @@ class ReplayBuffer:
 
         if not wo_visual:
             self.next_point_cloud = np.zeros((args.batch_size, *shape_info['obs']['point_cloud']))
-            self.next_image = np.zeros((args.batch_size, *shape_info['obs']['image']))
+            if self.use_legacy_image:
+                self.next_image = np.zeros((args.batch_size, *self.image_shapes['image']))
+            else:
+                self.next_images = {
+                    key: np.zeros((args.batch_size, *shape), dtype=np.float32)
+                    for key, shape in self.image_shapes.items()
+                }
             if self.use_imagin_robot:
                 self.next_imagin_robot = np.zeros((args.batch_size, *shape_info['obs']['imagin_robot']))
 
@@ -39,10 +53,16 @@ class ReplayBuffer:
         self.count = 0
         self.device = device
 
+    def _get_image_array(self, key, next_obs=False):
+        if key == 'image' and self.use_legacy_image:
+            return self.next_image if next_obs else self.image
+        return self.next_images[key] if next_obs else self.images[key]
+
     def store(self, obs, action, a_logprob, reward, next_obs, done, dw):
         if not self.wo_visual:
             self.point_cloud[self.count] = obs['point_cloud']
-            self.image[self.count] = obs['image']
+            for key in self.image_keys:
+                self._get_image_array(key)[self.count] = obs[key]
             if self.use_imagin_robot:
                 self.imagin_robot[self.count] = obs['imagin_robot']
         # import pdb; pdb.set_trace()
@@ -52,7 +72,8 @@ class ReplayBuffer:
         self.reward[self.count] = reward
         if not self.wo_visual:
             self.next_point_cloud[self.count] = next_obs['point_cloud']
-            self.next_image[self.count] = next_obs['image']
+            for key in self.image_keys:
+                self._get_image_array(key, next_obs=True)[self.count] = next_obs[key]
             if self.use_imagin_robot:
                 self.next_imagin_robot[self.count] = next_obs['imagin_robot']
         self.next_agent_pos[self.count] = next_obs['agent_pos']
@@ -67,26 +88,23 @@ class ReplayBuffer:
         ind = np.random.randint(0, int(self.count), size=batch_size)
         if not self.wo_visual:
             point_cloud = torch.FloatTensor(self.point_cloud[ind]).to(self.device)
-            image = torch.FloatTensor(self.image[ind]).to(self.device)
+            images = {
+                key: torch.FloatTensor(self._get_image_array(key)[ind]).to(self.device)
+                for key in self.image_keys
+            }
             if self.use_imagin_robot:
                 imagin_robot = torch.FloatTensor(self.imagin_robot[ind]).to(self.device)
         agent_pos = torch.FloatTensor(self.agent_pos[ind]).to(self.device)
         action = torch.FloatTensor(self.action[ind]).to(self.device)
 
         if not self.wo_visual:
-            if self.use_imagin_robot:
-                obs = {
+            obs = {
                 'point_cloud': point_cloud, # T, 1024, 6
                 'agent_pos': agent_pos, # T, D_pos
-                'image': image, # T, 84, 84, 3
-                'imagin_robot': imagin_robot, # T, 96, 7
+                **images,
             }
-            else:
-                obs = {
-                    'point_cloud': point_cloud, # T, 1024, 6
-                    'agent_pos': agent_pos, # T, D_pos
-                    'image': image, # T, 84, 84, 3
-                }
+            if self.use_imagin_robot:
+                obs['imagin_robot'] = imagin_robot
         else:
             obs = {
                 'agent_pos': agent_pos, # T, D_pos
@@ -95,36 +113,28 @@ class ReplayBuffer:
 
     def numpy_to_dict(self):
         if not self.wo_visual:
-            if self.use_imagin_robot:
-                return {
-                    'point_cloud': self.point_cloud,
-                    'img': self.image,
-                    'imagin_robot': self.imagin_robot,
-                    'state': self.agent_pos,
-                    'action': self.action,
-                    'a_logprob': self.a_logprob,
-                    'reward': self.reward,
-                    'next_point_cloud': self.next_point_cloud,
-                    'next_img': self.next_image,
-                    'next_imagin_robot': self.next_imagin_robot,
-                    'next_state': self.next_agent_pos,
-                    'done': self.done,
-                    'dw': self.dw
-                }
+            result = {
+                'point_cloud': self.point_cloud,
+                'state': self.agent_pos,
+                'action': self.action,
+                'a_logprob': self.a_logprob,
+                'reward': self.reward,
+                'next_point_cloud': self.next_point_cloud,
+                'next_state': self.next_agent_pos,
+                'done': self.done,
+                'dw': self.dw,
+            }
+            if self.use_legacy_image:
+                result['img'] = self.image
+                result['next_img'] = self.next_image
             else:
-                return {
-                    'point_cloud': self.point_cloud,
-                    'img': self.image,
-                    'state': self.agent_pos,
-                    'action': self.action,
-                    'a_logprob': self.a_logprob,
-                    'reward': self.reward,
-                    'next_point_cloud': self.next_point_cloud,
-                    'next_img': self.next_image,
-                    'next_state': self.next_agent_pos,
-                    'done': self.done,
-                    'dw': self.dw
-                }
+                for key in self.image_keys:
+                    result[key] = self.images[key]
+                    result[f'next_{key}'] = self.next_images[key]
+            if self.use_imagin_robot:
+                result['imagin_robot'] = self.imagin_robot
+                result['next_imagin_robot'] = self.next_imagin_robot
+            return result
         else:
             return {
                 'state': self.agent_pos,
@@ -137,49 +147,50 @@ class ReplayBuffer:
             }
 
     
-    def numpy_to_tensor(self):
+    def numpy_to_tensor(self, device=None):
+        target_device = self.device if device is None else device
+
+        def to_tensor(array):
+            return torch.as_tensor(
+                array, dtype=torch.float, device=target_device)
+
         if not self.wo_visual:
-            point_cloud = torch.tensor(self.point_cloud, dtype=torch.float).to(self.device)
-            image = torch.tensor(self.image, dtype=torch.float).to(self.device)
+            point_cloud = to_tensor(self.point_cloud)
+            images = {
+                key: to_tensor(self._get_image_array(key))
+                for key in self.image_keys
+            }
             if self.use_imagin_robot:
-                imagin_robot = torch.tensor(self.imagin_robot, dtype=torch.float).to(self.device)
-        agent_pos = torch.tensor(self.agent_pos, dtype=torch.float).to(self.device)
-        action = torch.tensor(self.action, dtype=torch.float).to(self.device)
-        a_logprob = torch.tensor(self.a_logprob, dtype=torch.float).to(self.device)
-        reward = torch.tensor(self.reward, dtype=torch.float).to(self.device)
+                imagin_robot = to_tensor(self.imagin_robot)
+        agent_pos = to_tensor(self.agent_pos)
+        action = to_tensor(self.action)
+        a_logprob = to_tensor(self.a_logprob)
+        reward = to_tensor(self.reward)
         if not self.wo_visual:
-            next_point_cloud = torch.tensor(self.next_point_cloud, dtype=torch.float).to(self.device)
-            next_image = torch.tensor(self.next_image, dtype=torch.float).to(self.device)
+            next_point_cloud = to_tensor(self.next_point_cloud)
+            next_images = {
+                key: to_tensor(self._get_image_array(key, next_obs=True))
+                for key in self.image_keys
+            }
             if self.use_imagin_robot:
-                next_imagin_robot = torch.tensor(self.next_imagin_robot, dtype=torch.float).to(self.device)
-        next_agent_pos = torch.tensor(self.next_agent_pos, dtype=torch.float).to(self.device)
-        done = torch.tensor(self.done, dtype=torch.float).to(self.device)
-        dw = torch.tensor(self.dw, dtype=torch.float).to(self.device)
+                next_imagin_robot = to_tensor(self.next_imagin_robot)
+        next_agent_pos = to_tensor(self.next_agent_pos)
+        done = to_tensor(self.done)
+        dw = to_tensor(self.dw)
         if not self.wo_visual:
+            obs = {
+                'point_cloud': point_cloud, # T, 1024, 6
+                'agent_pos': agent_pos, # T, D_pos
+                **images,
+            }
+            next_obs = {
+                'point_cloud': next_point_cloud, # T, 1024, 6
+                'agent_pos': next_agent_pos, # T, D_pos
+                **next_images,
+            }
             if self.use_imagin_robot:
-                obs = {
-                    'point_cloud': point_cloud, # T, 1024, 6
-                    'agent_pos': agent_pos, # T, D_pos
-                    'image': image, # T, 84, 84, 3
-                    'imagin_robot': imagin_robot, # T, 96, 7
-                }
-                next_obs = {
-                    'point_cloud': next_point_cloud, # T, 1024, 6
-                    'agent_pos': next_agent_pos, # T, D_pos
-                    'image': next_image, # T, 84, 84, 3
-                    'imagin_robot': next_imagin_robot, # T, 96, 7
-                }
-            else:
-                obs = {
-                    'point_cloud': point_cloud, # T, 1024, 6
-                    'agent_pos': agent_pos, # T, D_pos
-                    'image': image, # T, 84, 84, 3
-                }
-                next_obs = {
-                    'point_cloud': next_point_cloud, # T, 1024, 6
-                    'agent_pos': next_agent_pos, # T, D_pos
-                    'image': next_image, # T, 84, 84, 3
-                }
+                obs['imagin_robot'] = imagin_robot
+                next_obs['imagin_robot'] = next_imagin_robot
         else:
             obs = {
                 'agent_pos': agent_pos, # T, D_pos

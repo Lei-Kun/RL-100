@@ -434,13 +434,18 @@ class TrainDP3Workspace:
         assert isinstance(dataset, BaseDataset), print(f"dataset must be BaseDataset, got {type(dataset)}")
         train_dataloader = DataLoader(dataset, **cfg.dataloader)
         use_checkpoint_normalizer = bool(
-            cfg.eval
-            and cfg.get('use_checkpoint_normalizer', False)
-            and loaded_stage1_checkpoint
+            (cfg.eval or cfg.online)
+            and cfg.get('use_checkpoint_normalizer', True)
         )
         if use_checkpoint_normalizer:
-            normalizer = self.model.normalizer
-            cprint('reuse the normalizer stored in the evaluation checkpoint', 'yellow')
+            if not loaded_stage1_checkpoint:
+                raise RuntimeError(
+                    'eval/online requires a stage-1 checkpoint normalizer, '
+                    'but no checkpoint was loaded. Check training.resume and '
+                    'unio4.stage1_resume_dir.'
+                )
+            normalizer = deepcopy(self.model.normalizer)
+            cprint('using the normalizer stored in the stage-1 checkpoint', 'yellow')
         elif (self.cfg.off2off and self.cfg.off2off_no_bc) or self.cfg.use_pre_norm:
             norm_dataset = hydra.utils.instantiate(cfg.task.norm_dataset)
             normalizer = norm_dataset.get_normalizer()
@@ -695,13 +700,13 @@ class TrainDP3Workspace:
                 self.global_step += 1
                 self.epoch += 1
                 del step_log
-        # if cfg.eval:
-        #     log_data = self.eval(
-        #         eval_times=self.cfg.unio4.eval_times,
-        #         online=False,
-        #         data_collect=self.cfg.data_collect,
-        #     )
-        #     return log_data['test_mean_score']
+        if cfg.eval and cfg.load_bc:
+            log_data = self.eval(
+                eval_times=self.cfg.unio4.eval_times,
+                online=False,
+                data_collect=self.cfg.data_collect,
+            )
+            return log_data['test_mean_score']
 
         self.offline_best_path = self.get_global_best_dir()
         self.offline_last_path = os.path.join(self.output_dir, 'last')
@@ -1553,12 +1558,20 @@ class TrainDP3Workspace:
 
         # Define replay buffer persistence paths (per-run, under this hydra output dir)
         replay_buffer_path = os.path.join(self.output_dir, 'replay_buffer_checkpoint.pkl')
-        is_save_image = bool(getattr(self.cfg.ppo, 'is_save_image', False))
+        replay_buffer_verify_interval_episodes = 10
+        load_online_cp = bool(getattr(self.cfg.ppo, 'load_online_cp', False))
+        load_online_buffer = bool(
+            getattr(self.cfg.ppo, 'load_online_buffer', False))
+        if load_online_buffer and not load_online_cp:
+            cprint(
+                '[Resume] loading an online replay buffer without an online '
+                'checkpoint. This is only on-policy if no policy update '
+                'succeeded after that buffer was collected and the same '
+                'offline policy checkpoint/config is being restored.',
+                'yellow',
+            )
 
-        # On-policy safety: only restore the pkl if the matching online policy checkpoint
-        # exists (it was saved right after a PPO update and before new collection). Otherwise
-        # the a_logprob in the buffer was produced by a policy we can no longer recover, so
-        # loading it would break on-policy. Drop the stale pkl in that case.
+        # Discover checkpoints, but restore them only when explicitly requested.
         online_cp_root = os.path.join(self.output_dir, 'online_ft')
         latest_online_cp_dir = None
         if os.path.isdir(online_cp_root):
@@ -1569,46 +1582,61 @@ class TrainDP3Workspace:
                     candidates.append(_full)
             if candidates:
                 latest_online_cp_dir = candidates[-1]
-        has_online_policy_cp = latest_online_cp_dir is not None
+        if load_online_cp and latest_online_cp_dir is None:
+            raise FileNotFoundError(
+                f'ppo.load_online_cp=True but no online checkpoint was found '
+                f'under {online_cp_root}')
 
-        if os.path.exists(replay_buffer_path) and not has_online_policy_cp:
-            print(f"[On-policy guard] Dropping orphan replay buffer at {replay_buffer_path} "
-                  f"(no matching online policy checkpoint under {online_cp_root})")
-            try:
-                os.remove(replay_buffer_path)
-            except OSError as _e:
-                print(f"[On-policy guard] failed to remove orphan buffer: {_e}")
-
-        # Load replay buffer checkpoint if exists
-        if os.path.exists(replay_buffer_path):
+        # Replay data is restored only through its own explicit flag.
+        if load_online_buffer:
+            if not os.path.exists(replay_buffer_path):
+                raise FileNotFoundError(
+                    f'ppo.load_online_buffer=True but no replay buffer was found '
+                    f'at {replay_buffer_path}')
             try:
                 with open(replay_buffer_path, 'rb') as f:
                     checkpoint = pickle.load(f)
 
-                # Required fields
-                required_fields = ['point_cloud', 'agent_pos', 'action', 'a_logprob',
-                                   'next_point_cloud', 'next_agent_pos', 'reward', 'done', 'dw', 'count']
+                count = int(checkpoint.get('count', 0))
+                if not 0 < count <= self.cfg.ppo.batch_size:
+                    raise ValueError(
+                        f'invalid replay buffer count {count}; expected 1..'
+                        f'{self.cfg.ppo.batch_size}')
 
-                # Restore required fields
+                required_fields = ['point_cloud', 'agent_pos', 'action', 'a_logprob',
+                                   'next_point_cloud', 'next_agent_pos', 'reward', 'done', 'dw']
+
                 for field in required_fields:
-                    if field in checkpoint:
-                        setattr(replay_buffer, field, checkpoint[field])
-                    else:
-                        print(f"Warning: required field '{field}' missing from replay checkpoint")
-                        replay_buffer.count = 0
-                        break
+                    if field not in checkpoint:
+                        raise KeyError(
+                            f"required field '{field}' is missing from replay checkpoint")
+                    target = getattr(replay_buffer, field)
+                    target[:count] = checkpoint[field][:count]
+                replay_buffer.count = count
 
                 rollout_buffer_episode_successes = list(
                     checkpoint.get('rollout_buffer_episode_successes', []))
 
-                # Restore optional image fields
-                if is_save_image:
-                    if 'image' in checkpoint and hasattr(replay_buffer, 'image'):
-                        replay_buffer.image = checkpoint['image']
-                    else:
-                        print("Warning: image field missing from checkpoint but is_save_image=True")
-                    if 'next_image' in checkpoint and hasattr(replay_buffer, 'next_image'):
-                        replay_buffer.next_image = checkpoint['next_image']
+                image_encodings = checkpoint.get('image_encodings', {})
+                for image_key in replay_buffer.image_keys:
+                    next_image_key = f'next_{image_key}'
+                    if image_key not in checkpoint or next_image_key not in checkpoint:
+                        raise KeyError(
+                            f"visual replay checkpoint is missing '{image_key}' "
+                            f"or '{next_image_key}'; the saved transitions cannot "
+                            'be resumed safely')
+                    encoding = image_encodings.get(image_key, 'float')
+                    image = checkpoint[image_key][:count]
+                    next_image = checkpoint[next_image_key][:count]
+                    if encoding == 'uint8_0_1':
+                        image = image.astype(np.float32) / 255.0
+                        next_image = next_image.astype(np.float32) / 255.0
+                    elif encoding == 'uint8_0_255':
+                        image = image.astype(np.float32)
+                        next_image = next_image.astype(np.float32)
+                    replay_buffer._get_image_array(image_key)[:count] = image
+                    replay_buffer._get_image_array(
+                        image_key, next_obs=True)[:count] = next_image
 
                 # Restore optional imagin_robot fields
                 if hasattr(replay_buffer, 'use_imagin_robot') and replay_buffer.use_imagin_robot:
@@ -1619,30 +1647,55 @@ class TrainDP3Workspace:
 
                 print(f"Loaded replay buffer checkpoint with {replay_buffer.count} transitions")
             except Exception as e:
-                print(f"Failed to load replay buffer checkpoint: {e}")
-                replay_buffer.count = 0
+                raise RuntimeError(
+                    f'Failed to load replay buffer checkpoint: {e}') from e
+        elif os.path.exists(replay_buffer_path):
+            cprint(
+                f'[Resume] replay buffer exists at {replay_buffer_path} but '
+                f'ppo.load_online_buffer=False; ignoring it.',
+                'yellow',
+            )
 
         def save_replay_buffer_checkpoint():
             if replay_buffer.count <= 0:
                 return
             try:
+                count = replay_buffer.count
                 checkpoint = {
-                    'point_cloud': replay_buffer.point_cloud,
-                    'agent_pos': replay_buffer.agent_pos,
-                    'action': replay_buffer.action,
-                    'a_logprob': replay_buffer.a_logprob,
-                    'next_point_cloud': replay_buffer.next_point_cloud,
-                    'next_agent_pos': replay_buffer.next_agent_pos,
-                    'reward': replay_buffer.reward,
-                    'done': replay_buffer.done,
-                    'dw': replay_buffer.dw,
-                    'count': replay_buffer.count,
+                    'point_cloud': replay_buffer.point_cloud[:count],
+                    'agent_pos': replay_buffer.agent_pos[:count],
+                    'action': replay_buffer.action[:count],
+                    'a_logprob': replay_buffer.a_logprob[:count],
+                    'next_point_cloud': replay_buffer.next_point_cloud[:count],
+                    'next_agent_pos': replay_buffer.next_agent_pos[:count],
+                    'reward': replay_buffer.reward[:count],
+                    'done': replay_buffer.done[:count],
+                    'dw': replay_buffer.dw[:count],
+                    'count': count,
                     'rollout_buffer_episode_successes': rollout_buffer_episode_successes,
+                    'image_encodings': {},
                 }
 
-                if is_save_image and hasattr(replay_buffer, 'image'):
-                    checkpoint['image'] = replay_buffer.image
-                    checkpoint['next_image'] = replay_buffer.next_image
+                for image_key in replay_buffer.image_keys:
+                    image = replay_buffer._get_image_array(image_key)[:count]
+                    next_image = replay_buffer._get_image_array(
+                        image_key, next_obs=True)[:count]
+                    image_min = min(float(image.min()), float(next_image.min()))
+                    image_max = max(float(image.max()), float(next_image.max()))
+                    if image_min >= 0.0 and image_max <= 1.0:
+                        checkpoint[image_key] = np.rint(image * 255.0).astype(np.uint8)
+                        checkpoint[f'next_{image_key}'] = np.rint(
+                            next_image * 255.0).astype(np.uint8)
+                        checkpoint['image_encodings'][image_key] = 'uint8_0_1'
+                    elif image_min >= 0.0 and image_max <= 255.0:
+                        checkpoint[image_key] = np.rint(image).astype(np.uint8)
+                        checkpoint[f'next_{image_key}'] = np.rint(
+                            next_image).astype(np.uint8)
+                        checkpoint['image_encodings'][image_key] = 'uint8_0_255'
+                    else:
+                        checkpoint[image_key] = image
+                        checkpoint[f'next_{image_key}'] = next_image
+                        checkpoint['image_encodings'][image_key] = 'float'
 
                 if hasattr(replay_buffer, 'use_imagin_robot') and replay_buffer.use_imagin_robot:
                     if hasattr(replay_buffer, 'imagin_robot'):
@@ -1673,9 +1726,29 @@ class TrainDP3Workspace:
                         if not np.array_equal(checkpoint_val, buffer_val):
                             raise RuntimeError(f"Replay buffer mismatch on field '{field}' at episode boundary")
 
-                if is_save_image and 'image' in checkpoint and hasattr(replay_buffer, 'image'):
-                    if not np.array_equal(checkpoint['image'][:count], replay_buffer.image[:count]):
-                        raise RuntimeError("Replay buffer mismatch on field 'image' at episode boundary")
+                image_encodings = checkpoint.get('image_encodings', {})
+                for image_key in replay_buffer.image_keys:
+                    saved_image = checkpoint[image_key][:count]
+                    saved_next_image = checkpoint[f'next_{image_key}'][:count]
+                    encoding = image_encodings.get(image_key, 'float')
+                    if encoding == 'uint8_0_1':
+                        saved_image = saved_image.astype(np.float32) / 255.0
+                        saved_next_image = (
+                            saved_next_image.astype(np.float32) / 255.0)
+                    elif encoding == 'uint8_0_255':
+                        saved_image = saved_image.astype(np.float32)
+                        saved_next_image = saved_next_image.astype(np.float32)
+                    buffer_image = replay_buffer._get_image_array(image_key)[:count]
+                    buffer_next_image = replay_buffer._get_image_array(
+                        image_key, next_obs=True)[:count]
+                    if (not np.allclose(
+                            saved_image, buffer_image, atol=1.0 / 255.0)
+                            or not np.allclose(
+                                saved_next_image, buffer_next_image,
+                                atol=1.0 / 255.0)):
+                        raise RuntimeError(
+                            f"Replay buffer mismatch on field '{image_key}' "
+                            'at episode boundary')
 
                 if hasattr(replay_buffer, 'use_imagin_robot') and replay_buffer.use_imagin_robot:
                     if 'imagin_robot' in checkpoint and hasattr(replay_buffer, 'imagin_robot'):
@@ -1689,26 +1762,21 @@ class TrainDP3Workspace:
             iql_buffer = IqlBuffer(None, args=self.cfg.ppo, shape_info=self.shape_info, device=self.device)
             # iql_buffer.initial_with_dataset(self.all_data)
             iql = iql_online
-        # Auto-resume online checkpoint whenever it exists on disk, so the loaded
-        # replay buffer (if any) stays on-policy with the current policy.
-        auto_load_online_cp = self.cfg.ppo.load_online_cp or has_online_policy_cp
-        if auto_load_online_cp:
-            if latest_online_cp_dir is None:
-                cprint(f"[Resume] load_online_cp requested but no ckpt found under "
-                       f"{online_cp_root}; proceeding fresh from offline policy.", 'yellow')
-                auto_load_online_cp = False
-            else:
-                cprint(f"[Resume] loading online ckpt from {latest_online_cp_dir}", 'green')
-                iql, value_net = self.load_online_checkpoints(latest_online_cp_dir, iql, value_net, ema)
+        loaded_online_cp = False
+        if load_online_cp:
+            cprint(f"[Resume] loading online ckpt from {latest_online_cp_dir}", 'green')
+            iql, value_net = self.load_online_checkpoints(
+                latest_online_cp_dir, iql, value_net, ema)
+            loaded_online_cp = True
         self.unio4.transfer2online(critic=value_net, dynamics=dynamics, cfg=self.cfg, cm_optimizer=cm_optimizer, cm_lr_scheduler=cm_lr_scheduler)
         critic_warmup_steps = max(
             0, int(getattr(self.cfg.ppo, 'critic_warmup_steps', 0)))
-        critic_warmup_pending = critic_warmup_steps > 0 and not auto_load_online_cp
+        critic_warmup_pending = critic_warmup_steps > 0 and not loaded_online_cp
 
         # Sync EMA to current online policy starting point (only for fresh offline→online,
         # NOT when resuming from online checkpoint which already restored EMA)
         if self.cfg.training.use_ema and self.ema_model is not None and ema is not None:
-            if not auto_load_online_cp:
+            if not loaded_online_cp:
                 ema_state = self.ema_model.state_dict()
                 policy_state = self.unio4._policy.state_dict()
                 filtered_state = {k: v for k, v in policy_state.items() if k in ema_state}
@@ -1758,7 +1826,7 @@ class TrainDP3Workspace:
         #         cm_all_success_rates.append(0)
         #         cm_all_returns.append(0)
         # else:
-        #     # log_data = self.eval(eval_times=self.cfg.unio4.eval_times, online=True, traj_path=online_ft_path, data_collect=self.cfg.data_collect)
+        #     log_data = self.eval(eval_times=self.cfg.unio4.eval_times, online=True, traj_path=online_ft_path, data_collect=self.cfg.data_collect)
         #     if self.cfg.distill_phase == 'online':
         #         cm_log_data = self.eval(online=True, eval_times=self.cfg.unio4.eval_times, use_cm=True, distill2mean=self.cfg.distill2mean, traj_path=online_ft_path, data_collect=self.cfg.data_collect)
         #         cm_all_success_rates.append(cm_log_data['test_mean_score'])
@@ -1838,6 +1906,8 @@ class TrainDP3Workspace:
             episode_steps = 0
             episode_reward = 0
             episode_success = False
+            episode_action_steps = 0
+            episode_start_time = time.time()
             # obs['image'] = np.transpose(obs['image'], (0,2,3,1))
             if self.cfg.ppo.clip_std_decay:
                 decay_value = self.value_decay(initial_value=self.cfg.clip_std_max, total_steps=total_steps, max_train_steps=self.cfg.ppo.max_train_steps)
@@ -1855,7 +1925,10 @@ class TrainDP3Workspace:
                 obs_dict_input['agent_pos'] = obs_dict['agent_pos'].unsqueeze(0)
                 if 'dexart' in self.cfg.task_name:
                     obs_dict_input['imagin_robot'] = obs_dict['imagin_robot'].unsqueeze(0)
-                obs_dict_input['image'] = (obs_dict['image'].unsqueeze(0)).to(torch.float)
+                for image_key in replay_buffer.image_keys:
+                    obs_dict_input[image_key] = (
+                        obs_dict[image_key].unsqueeze(0).to(torch.float)
+                    )
                 if self.cfg.ppo.idql_rollout:
                     action, all_x, a_logprob = self.unio4._policy.sample_action_with_logprob(obs_dict_input, dynamics=dynamics, first_action=self.cfg.unio4.first_action, use_gae=self.cfg.unio4.use_gae, iql=iql, Q=Q, repeat_num=128)
                 else:
@@ -1866,7 +1939,14 @@ class TrainDP3Workspace:
                 a_logprob = a_logprob.squeeze(1).detach().to('cpu').numpy()
 
                 # step env - use step_online for real robot training
-                next_obs, reward, done, info = env.step_online(action.squeeze(0).detach().to('cpu').numpy(), gamma=self.cfg.gamma)
+                action_chunk = action.squeeze(0).detach().to('cpu').numpy()
+                env_steps_before = len(env.reward) if hasattr(env, 'reward') else None
+                next_obs, reward, done, info = env.step_online(
+                    action_chunk, gamma=self.cfg.gamma)
+                if env_steps_before is None:
+                    episode_action_steps += len(action_chunk)
+                else:
+                    episode_action_steps += len(env.reward) - env_steps_before
 
                 # Handle None reward (can occur during keyboard input)
                 if reward is None:
@@ -1926,6 +2006,14 @@ class TrainDP3Workspace:
                     episode_return_history.append(episode_reward)
                     episode_success_history.append(float(episode_success))
                     rollout_buffer_episode_successes.append(float(episode_success))
+                    episode_elapsed = max(time.time() - episode_start_time, 1e-6)
+                    action_frequency = episode_action_steps / episode_elapsed
+                    cprint(
+                        f'Online trajectory {len(episode_return_history) - 1}: '
+                        f'success={episode_success}, return={episode_reward:.3f}, '
+                        f'action frequency={action_frequency:.2f} Hz',
+                        'green' if episode_success else 'yellow',
+                    )
                     reward_log.update({
                         'online_reward/episode_return': episode_reward,
                         'online_reward/episode_return_mean_10': float(np.mean(total_episode_r)),
@@ -2025,6 +2113,8 @@ class TrainDP3Workspace:
                     pre_training_time = time.time()
                     pre_training_time = time.time()
                     actor_loss, critic_loss, bc_loss, distill_loss = self.unio4.dp_align_update_no_share(replay_buffer, total_steps)
+                    if getattr(self.unio4, 'last_aux_metrics', None):
+                        wandb.log(dict(self.unio4.last_aux_metrics))
                     if distill_loss != 0:
                         distill_losses.append(distill_loss)
                     post_training_time = time.time()
@@ -2053,7 +2143,10 @@ class TrainDP3Workspace:
                     if isinstance(info, dict) and 'is_success' in info:
                         print(f"[Real Robot] Episode keyboard success: {episode_success}")
                     save_replay_buffer_checkpoint()
-                    verify_replay_buffer_checkpoint()
+                    completed_episode_count = len(episode_return_history)
+                    if completed_episode_count % replay_buffer_verify_interval_episodes == 0:
+                        verify_replay_buffer_checkpoint()
+
 
                 if done and total_steps % self.cfg.ppo.evaluate_freq == 0:
                     evaluate_num += 1

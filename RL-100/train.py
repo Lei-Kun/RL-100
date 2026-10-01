@@ -1701,6 +1701,8 @@ class TrainDP3Workspace:
                     pre_training_time = time.time()
                     pre_training_time = time.time()
                     actor_loss, critic_loss, bc_loss, distill_loss = self.unio4.dp_align_update_no_share(replay_buffer, total_steps)
+                    if getattr(self.unio4, 'last_aux_metrics', None):
+                        wandb.log(dict(self.unio4.last_aux_metrics))
                     if distill_loss != 0:
                         distill_losses.append(distill_loss)
                     post_training_time = time.time()

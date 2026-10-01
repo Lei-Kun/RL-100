@@ -26,6 +26,9 @@ from rl_100.common.pytorch_util import dict_apply
 import os
 from termcolor import cprint
 from rl_100.model.common.cm_util import update_ema
+from collections import defaultdict
+from contextlib import contextmanager
+from omegaconf import OmegaConf, DictConfig
 
 
 def compute_gae_per_env(rewards, dones, dws, vs, vs_, gamma, lamda, n_action_steps=1):
@@ -106,6 +109,15 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
         self.truncated_backprop_timestep = truncated_backprop_timestep
         self.cfg = cfg
         self.iteration = 0
+        # ---- lighting-aug defaults (overridden in transfer2online); off on every path ----
+        self.freeze_rgb_backbone = False
+        self.aux_enabled = False
+        self.aux_cfg = {}
+        self.aux_step = 0
+        self.last_aux_metrics = {}
+        self._aux_metric_buffer = defaultdict(list)
+        self.aux_photometric = None
+        self.aux_generator = None
 
         if truncated_backprop_timestep == 0:
             self.truncated_backprop_timestep = num_inference_steps - 1
@@ -136,7 +148,9 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
             vs, vs_: 当前状态和下一状态的critic值
         """
         batch_size = s['agent_pos'].shape[0]
-        chunk_size = min(256, batch_size)  # 可以根据显存情况调整chunk_size
+        configured_chunk_size = int(
+            getattr(self.args, 'critic_value_chunk_size', 256))
+        chunk_size = min(max(1, configured_chunk_size), batch_size)
         num_chunks = (batch_size + chunk_size - 1) // chunk_size
         vs_list, vs_list_ = [], []
         
@@ -144,8 +158,10 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
             start_idx = i * chunk_size
             end_idx = min((i + 1) * chunk_size, batch_size)
             
-            s_chunk = dict_apply(s, lambda x: x[start_idx:end_idx])
-            s_chunk_ = dict_apply(s_, lambda x: x[start_idx:end_idx])
+            s_chunk = dict_apply(
+                s, lambda x: x[start_idx:end_idx].to(self._device))
+            s_chunk_ = dict_apply(
+                s_, lambda x: x[start_idx:end_idx].to(self._device))
             
             if use_obs2latent:
                 critic_s_chunk = self._policy.obs2latent(s_chunk)
@@ -1093,13 +1109,69 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
 
         self.optimizer_critic = torch.optim.Adam(self.critic.parameters(), lr=self.args.lr_c, eps=1e-5)
 
+        # ---- lighting-aug: optional frozen rgb backbone ----
+        self.freeze_rgb_backbone = bool(getattr(cfg.ppo, 'freeze_rgb_backbone', False))
+        if self.freeze_rgb_backbone and not self.args.fix_encoder:
+            if self.args.encoder_lr_scale != 1.0:
+                raise ValueError('ppo.freeze_rgb_backbone requires ppo.encoder_lr_scale == 1.0')
+            enc = self._policy.obs_encoder
+            if not hasattr(enc, 'freeze_backbone'):
+                raise TypeError(f'{type(enc).__name__} has no freeze_backbone(); '
+                                'freeze_rgb_backbone is only for MultiImageObsEncoder')
+            n_frozen = enc.freeze_backbone()
+            trainable = [p for p in self._policy.parameters() if p.requires_grad]
+            self.optimizer_actor = torch.optim.Adam(trainable, lr=self.args.lr_a, eps=1e-5)
+            cprint(f'[freeze_rgb_backbone] froze {n_frozen} backbone tensors; '
+                   f'actor optimizer now has {len(trainable)} tensors', 'yellow')
+        elif self.freeze_rgb_backbone:
+            cprint('[freeze_rgb_backbone] ignored because ppo.fix_encoder=True already excludes the encoder', 'yellow')
+
+        # ---- lighting-aug: optional prediction-consistency auxiliary ----
+        aux_cfg = getattr(cfg.ppo, 'aux_consistency', None)
+        if aux_cfg is None:
+            self.aux_cfg = {}
+        elif isinstance(aux_cfg, DictConfig):
+            self.aux_cfg = OmegaConf.to_container(aux_cfg, resolve=True)
+        else:
+            self.aux_cfg = dict(aux_cfg)
+        self.aux_enabled = bool(self.aux_cfg.get('enabled', False))
+        self.aux_step = 0
+        self.last_aux_metrics = {}
+        self._aux_metric_buffer = defaultdict(list)
+        self.aux_photometric = None
+        self.aux_generator = None
+        if self.aux_enabled:
+            from rl_100.model.common.photometric_aug import PhotometricAug
+            la_node = getattr(cfg.policy, 'lighting_aug', None)
+            if la_node is None:
+                raise ValueError('ppo.aux_consistency.enabled=True requires policy.lighting_aug in the config '
+                                 '(only rl100_2d_*.yaml define it; aux_consistency is 2D-only)')
+            la_cfg = OmegaConf.to_container(la_node, resolve=True) if isinstance(la_node, DictConfig) else dict(la_node)
+            self.aux_photometric = PhotometricAug(la_cfg)          # reuses the offline range table; ignores la_cfg['enabled']
+            profile = self.aux_cfg.get('lighting_profile', 'mild')
+            if profile not in PhotometricAug.PROFILES:
+                raise ValueError(f'ppo.aux_consistency.lighting_profile must be one of {PhotometricAug.PROFILES}, got {profile!r}')
+            if not hasattr(self._policy, 'build_consistency_views'):
+                raise TypeError(f'aux_consistency requires RL1002D, got {type(self._policy).__name__}')
+            frac = float(self.aux_cfg.get('batch_fraction', 0.5))
+            if not (0.0 < frac <= 1.0):
+                raise ValueError(f'ppo.aux_consistency.batch_fraction must be in (0, 1], got {frac}')
+            seed = int(getattr(cfg.training, 'seed', 0)) + 20260930
+            self.aux_generator = torch.Generator(device=self._device)
+            self.aux_generator.manual_seed(seed)
+            cprint(f'[aux_consistency] enabled: {self.aux_cfg}', 'yellow')
+
     def warmup_critic(self, replay_buffer, gradient_steps):
         """Fit only the critic on the first full online rollout buffer."""
         gradient_steps = int(gradient_steps)
         if gradient_steps <= 0:
             return 0.0
 
-        s, _, _, r, s_, dw, done = replay_buffer.numpy_to_tensor()
+        s, _, _, r, s_, dw, done = replay_buffer.numpy_to_tensor(
+            device='cpu')
+        r = r.to(self._device)
+        dw = dw.to(self._device)
+        done = done.to(self._device)
         with torch.no_grad():
             if self.args.share_encoder:
                 vs, vs_ = self._compute_critic_values_in_chunks(
@@ -1128,7 +1200,9 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
         for _ in tqdm(range(gradient_steps), desc='Critic warmup'):
             index = torch.randint(
                 batch_size, (mini_batch_size,), device=self._device)
-            state = dict_apply(s, lambda x: x[index])
+            index_cpu = index.cpu()
+            state = dict_apply(
+                s, lambda x: x[index_cpu].to(self._device))
 
             if self.args.share_encoder:
                 with torch.no_grad():
@@ -1177,7 +1251,16 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
                 loss_metric = self._policy.train_align(replay_buffer, self.optimizer_actor, self.args.fix_encoder, self.args.batch_size, iterations = self.args.iterations, mini_batch_size=self.args.mini_batch_size)
         else:
             loss_metric['bc_loss'] = 0
-        s, a, a_logprob, r, s_, dw, done = replay_buffer.numpy_to_tensor()  # Get training data
+        # Keep high-resolution replay observations on CPU. Moving all current
+        # and next images for the full rollout to CUDA creates a multi-GB
+        # allocation before the first PPO mini-batch.
+        s, a, a_logprob, r, s_, dw, done = replay_buffer.numpy_to_tensor(
+            device='cpu')
+        a = a.to(self._device)
+        a_logprob = a_logprob.to(self._device)
+        r = r.to(self._device)
+        dw = dw.to(self._device)
+        done = done.to(self._device)
         a, a_logprob = a.transpose(0,1), a_logprob.transpose(0, 1)
 
         if precomputed is not None:
@@ -1213,10 +1296,12 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
             # Random sampling and no repetition. 'False' indicates that training will continue even if the number of samples in the last time is less than mini_batch_size
             for index in BatchSampler(SubsetRandomSampler(range(self.args.batch_size)), self.args.mini_batch_size, False):
                 actions = a[:, index, :]
-                state = dict_apply(s, lambda x: x[index])
+                state = dict_apply(
+                    s, lambda x: x[index].to(self._device))
                 local_cond = None
                 a_logprob_old = a_logprob[:, index, :]
                 approx_kl_divs = []
+                aux_ctx = self._prepare_aux_minibatch(state) if self.aux_enabled else None
                 for i, t in enumerate(self._policy.noise_scheduler.timesteps):
                     timesteps = t
                     if not torch.is_tensor(timesteps):
@@ -1306,6 +1391,16 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
                             for param_group in self.optimizer_encoder.param_groups:
                                 param_group['lr'] = lr_actor * self.args.encoder_lr_scale
 
+                    if aux_ctx is not None:
+                        aux_loss, aux_info = self._aux_consistency_step(aux_ctx, actions[i], unet_timesteps, local_cond)
+                        lam = self._aux_lambda()
+                        grad_log_every = int(self.aux_cfg.get('grad_log_every', 0) or 0)
+                        if grad_log_every > 0 and self.aux_step % grad_log_every == 0:
+                            aux_info.update(self._aux_grad_norms(actor_loss.mean(), lam * aux_loss))
+                        actor_loss = actor_loss + lam * aux_loss   # [B] + scalar: .mean() == ppo_mean + lam * aux_loss
+                        aux_info['aux/lambda'] = lam
+                        self._accumulate_aux_metrics(aux_info)
+
                     #Actor Gradient step
                     if not self.args.fix_encoder and self.args.encoder_lr_scale != 1.0:
                         self.optimizer_encoder.zero_grad()
@@ -1313,6 +1408,8 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
                     actor_loss.mean().backward()
                     nn.utils.clip_grad_norm_(list(self._policy.obs_encoder.parameters()) + list(self._policy.model.parameters()), 0.5)
                     self.optimizer_actor.step()
+                    if aux_ctx is not None:
+                        self.aux_step += 1
 
                     # encoder update if not fixed and encoder_lr_scale is not 1.0
                     if not self.args.fix_encoder:
@@ -1324,6 +1421,9 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
                         if self.update_phase == 'step':
                             batch = {'obs':state, 'action':actions[-1]}
                             distill_loss = self.distill_update(batch=batch, online=True)
+                if aux_ctx is not None and bool(self.aux_cfg.get('log_post_update_kl', False)):
+                    self._accumulate_aux_metrics(
+                        {'aux/post_update_approx_kl': self._post_update_approx_kl(state, actions, a_logprob_old)})
                 if self.distill:
                     if self.update_phase == 'iteration':
                         batch = {'obs':state, 'action':actions[-1]}
@@ -1375,10 +1475,173 @@ class BehaviorProximalPolicyOptimization(ProximalPolicyOptimization):
         self.last_ppo_elapsed = time.time() - ppo_start
         if self.args.use_lr_decay:  # Trick 6:learning rate Decay
             self.lr_decay(total_steps)
+        self.last_aux_metrics = self._finalize_aux_metrics()
         if self.distill:
             return np.mean(actor_losses), np.mean(critic_losses) , loss_metric['bc_loss'], distill_loss
         else:
             return np.mean(actor_losses), np.mean(critic_losses) , loss_metric['bc_loss'], 0
+
+    # ------------------------------------------------------------------ lighting-aug auxiliary
+    @contextmanager
+    def _aux_rng_scope(self):
+        """Keep the PPO main branch's global random stream untouched by the auxiliary (R6).
+
+        The auxiliary draws its own randomness from ``self.aux_generator``, but the denoiser may
+        contain dropout (MLPResNet) and VIB heads sample noise in training mode, both reading the
+        *global* RNG. Forking the global RNG state around the auxiliary forward passes makes a run
+        with the auxiliary consume exactly the same global random numbers as a run without it.
+        """
+        dev = torch.device(self._device)
+        devices = []
+        if dev.type == 'cuda':
+            devices = [dev.index if dev.index is not None else torch.cuda.current_device()]
+        with torch.random.fork_rng(devices=devices):
+            yield
+
+    def _aux_draw_seed(self):
+        return int(torch.randint(0, 2 ** 31 - 1, (1,), device=self._device, generator=self.aux_generator).item())
+
+    def _seed_local_rng(self, seed):
+        """Seed only the CPU generator and (if used) the auxiliary's own CUDA device (never *_all)."""
+        torch.default_generator.manual_seed(seed)
+        dev = torch.device(self._device)
+        if dev.type == 'cuda':
+            idx = dev.index if dev.index is not None else torch.cuda.current_device()
+            torch.cuda.default_generators[idx].manual_seed(seed)
+
+    def _aux_lambda(self):
+        lam = float(self.aux_cfg.get('lambda_actor', 0.0))
+        warm = int(self.aux_cfg.get('warmup_steps', 0) or 0)
+        if warm > 0:
+            lam = lam * min(1.0, (self.aux_step + 1) / warm)
+        return lam
+
+    def _prepare_aux_minibatch(self, state):
+        """Pick the auxiliary subset of the minibatch, build (clean, aug) views and cache what the
+        encoder configuration allows (see spec 5.4 for the four modes)."""
+        B = state['agent_pos'].shape[0]
+        frac = float(self.aux_cfg.get('batch_fraction', 0.5))
+        n_aux = max(1, int(round(B * frac)))
+        aux_idx = torch.randperm(B, device=self._device, generator=self.aux_generator)[:n_aux]
+        state_aux = dict_apply(state, lambda x: x[aux_idx])
+        shift_prob = float(self.aux_cfg.get('random_shift_prob', 0.5))
+        shift_mask = torch.rand(n_aux, device=self._device, generator=self.aux_generator) < shift_prob
+        profile = self.aux_cfg.get('lighting_profile', 'mild')
+        views_c, views_a, stats = self._policy.build_consistency_views(
+            state_aux, shift_mask, lighting_profile=profile,
+            photometric=self.aux_photometric, generator=self.aux_generator)
+        enc = self._policy.obs_encoder
+        if hasattr(enc, 'has_trainable_params'):
+            enc_has_trainable = enc.has_trainable_params()
+        else:
+            enc_has_trainable = any(p.requires_grad for p in enc.parameters())
+        encoder_trainable = (not self.args.fix_encoder) and enc_has_trainable
+        ctx = {'aux_idx': aux_idx, 'n_aux': n_aux, 'views_c': views_c, 'views_a': views_a,
+               'n_shift': int(shift_mask.sum().item()), 'stats': stats}
+        with self._policy._deterministic_obs_encoder():
+            if not encoder_trainable:
+                ctx['mode'] = 'cached_full'
+                with torch.no_grad():
+                    ctx['feat_c'] = self._policy.encode_flat(views_c).reshape(n_aux, -1)
+                    ctx['feat_a'] = self._policy.encode_flat(views_a).reshape(n_aux, -1)
+            elif self.freeze_rgb_backbone and hasattr(enc, 'backbone_forward'):
+                ctx['mode'] = 'cached_backbone'
+                with torch.no_grad():
+                    ctx['bb_c'] = enc.backbone_forward(views_c)
+                    ctx['bb_a'] = enc.backbone_forward(views_a)
+            else:
+                ctx['mode'] = 'full'
+        return ctx
+
+    def _aux_consistency_step(self, ctx, x_i, unet_timesteps, local_cond):
+        """MSE between the denoiser output on the lighting-augmented view and the (stop-grad)
+        output on the clean view, at the current denoise step. Does not touch any main-branch tensor."""
+        idx, n = ctx['aux_idx'], ctx['n_aux']
+        x = x_i[idx]
+        t = unet_timesteps[idx] if torch.is_tensor(unet_timesteps) and unet_timesteps.ndim > 0 else unet_timesteps
+        enc = self._policy.obs_encoder
+        with self._aux_rng_scope():
+            with self._policy._deterministic_obs_encoder():
+                if ctx['mode'] == 'cached_full':
+                    feat_c, feat_a = ctx['feat_c'], ctx['feat_a']
+                elif ctx['mode'] == 'cached_backbone':
+                    with torch.no_grad():
+                        feat_c = enc.head_forward(ctx['bb_c'], ctx['views_c']).reshape(n, -1)
+                    feat_a = enc.head_forward(ctx['bb_a'], ctx['views_a']).reshape(n, -1)
+                else:
+                    with torch.no_grad():
+                        feat_c = self._policy.encode_flat(ctx['views_c']).reshape(n, -1)
+                    feat_a = self._policy.encode_flat(ctx['views_a']).reshape(n, -1)
+            # identical dropout masks (if any) for target and prediction
+            seed = self._aux_draw_seed()
+            self._seed_local_rng(seed)
+            with torch.no_grad():
+                target = self._policy.model(sample=x, timestep=t, local_cond=local_cond, global_cond=feat_c)
+            self._seed_local_rng(seed)
+            pred = self._policy.model(sample=x, timestep=t, local_cond=local_cond, global_cond=feat_a)
+        aux_loss = F.mse_loss(pred, target)
+        info = {
+            'aux/loss': aux_loss.item(),
+            'aux/feat_l2': (feat_a.detach() - feat_c).norm(dim=-1).mean().item(),
+            'aux/pred_l2': (pred.detach() - target).flatten(1).norm(dim=-1).mean().item(),
+            'aux/n_shift': ctx['n_shift'], 'aux/n_aux': n,
+        }
+        info.update({f'aux/{k}': float(v) for k, v in ctx['stats'].items()})
+        info['aux/mode_' + ctx['mode']] = 1.0
+        return aux_loss, info
+
+    def _aux_grad_norms(self, ppo_loss_mean, scaled_aux_loss):
+        params = [p for p in self._policy.parameters() if p.requires_grad]
+
+        def _norm(grads):
+            sq = [g.pow(2).sum() for g in grads if g is not None]
+            return float(torch.sqrt(torch.stack(sq).sum()).item()) if sq else 0.0
+
+        g_ppo = torch.autograd.grad(ppo_loss_mean, params, retain_graph=True, allow_unused=True)
+        g_aux = torch.autograd.grad(scaled_aux_loss, params, retain_graph=True, allow_unused=True)
+        return {'aux/ppo_grad_norm': _norm(g_ppo), 'aux/aux_grad_norm': _norm(g_aux)}
+
+    def _post_update_approx_kl(self, state, actions, a_logprob_old):
+        """Diagnostic: approx KL between the just-updated policy and the rollout log-probs on this
+        minibatch, averaged over denoise steps. Flow schedulers only (F17); otherwise nan."""
+        if not getattr(self._policy, 'is_flow', False):
+            if not getattr(self, '_warned_post_update_kl', False):
+                cprint('[aux_consistency] log_post_update_kl only supports flow schedulers; logging nan', 'yellow')
+                self._warned_post_update_kl = True
+            return float('nan')
+        action_start = 0 if self.cfg.no_pre_action else self.n_obs_steps - 1
+        action_end = action_start + self.cfg.n_action_steps
+        kls = []
+        with self._aux_rng_scope(), torch.no_grad():
+            for i, t in enumerate(self._policy.noise_scheduler.timesteps):
+                timesteps = t
+                if not torch.is_tensor(timesteps):
+                    timesteps = torch.tensor([timesteps], dtype=torch.long, device=self._device)
+                elif timesteps.ndim == 0:
+                    timesteps = timesteps[None].to(self._device)
+                timesteps = timesteps.expand(actions.shape[1])
+                unet_timesteps = self._policy.get_unet_timesteps(timesteps)
+                obs_feature = self._policy.obs2latent(state)
+                model_output = self._policy.model(sample=actions[i], timestep=unet_timesteps,
+                                                  local_cond=None, global_cond=obs_feature)
+                eta = 1.
+                if getattr(self._policy, 'diffusion_eta', False):
+                    eta = torch.mean(model_output[:, :, -1], dim=1, keepdim=True)
+                a_logprob_now, _ = self._policy.noise_scheduler.step_forward_logprob_with_entropy(
+                    model_output, timesteps, actions[i], next_sample=actions[i + 1], eta=eta)
+                log_ratio = a_logprob_now[:, action_start:action_end] - a_logprob_old[i][:, action_start:action_end]
+                log_ratio = log_ratio.reshape(log_ratio.shape[0], -1).sum(dim=1)
+                kls.append(torch.mean((torch.exp(log_ratio) - 1) - log_ratio).item())
+        return float(np.mean(kls)) if kls else float('nan')
+
+    def _accumulate_aux_metrics(self, info):
+        for k, v in info.items():
+            self._aux_metric_buffer[k].append(float(v))
+
+    def _finalize_aux_metrics(self):
+        out = {k: float(np.mean(v)) for k, v in self._aux_metric_buffer.items() if len(v)}
+        self._aux_metric_buffer.clear()
+        return out
 
     def distill_update(self, batch = None, online = False):
         if getattr(self._policy, 'is_flow', False):

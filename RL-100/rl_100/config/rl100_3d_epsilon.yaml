@@ -25,6 +25,7 @@ ft_all_actions: True
 eval: False
 offline: False
 online: False
+use_checkpoint_normalizer: True
 num_inference_steps: 10
 cm_inference_steps: 1
 clip_std_min: 0.0067
@@ -478,6 +479,7 @@ ppo:
   iql_v_encoder: False
   v_encoder: False
   load_online_cp: False
+  load_online_buffer: False
   save_online_cp: False
   online_cp_save_freq: 2
   data_ratio: 0.7
