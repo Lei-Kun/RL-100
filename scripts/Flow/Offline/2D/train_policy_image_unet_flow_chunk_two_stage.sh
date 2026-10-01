@@ -18,7 +18,7 @@ addition_info=${3:?addition_info is required}
 seed=${4:?seed is required}
 NUM_GPUS=${5:-1}
 
-if [ "${task_name}" = "peg_2d" ]; then
+if [ "${task_name}" = "peg_2d" ] || [ "${task_name}" = "peg_2d_128" ]; then
     PRE_IMAGE_NORM=${PRE_IMAGE_NORM:-False}
     BATCH_SIZE=${BATCH_SIZE:-32}
     VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-32}
