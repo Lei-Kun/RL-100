@@ -18,15 +18,8 @@ addition_info=${3:?addition_info is required}
 seed=${4:?seed is required}
 NUM_GPUS=${5:-1}
 
-if [ "${task_name}" = "peg_2d" ]; then
-    PRE_IMAGE_NORM=${PRE_IMAGE_NORM:-False}
-    BATCH_SIZE=${BATCH_SIZE:-32}
-    VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-32}
-else
-    PRE_IMAGE_NORM=${PRE_IMAGE_NORM:-True}
-    BATCH_SIZE=${BATCH_SIZE:-512}
-    VAL_BATCH_SIZE=${VAL_BATCH_SIZE:-512}
-fi
+PRE_IMAGE_NORM=${PRE_IMAGE_NORM:-False}
+
 
 config_name=${config_name:-'rl100_2d_flow'}
 exp_name=${task_name}-${alg_name}-${addition_info}
@@ -98,6 +91,12 @@ STAGE1_EVAL_EPISODES=${STAGE1_EVAL_EPISODES:-5}
 MASTER_PORT=${MASTER_PORT:-29518}
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "${SCRIPT_DIR}/../../../.." && pwd )"
+# dp3 keeps Diffusers 0.14.0. Flow matching needs FlowMatchEulerDiscreteScheduler,
+# which is provided by the local Diffusers checkout without replacing that env package.
+if [ -d "${REPO_ROOT}/.gello_deps" ]; then
+    export PYTHONPATH="${REPO_ROOT}/.gello_deps${PYTHONPATH:+:${PYTHONPATH}}"
+fi
 
 if [ -n "${GPU_LIST}" ]; then
     gpu_list=${GPU_LIST}
@@ -210,18 +209,18 @@ get_common_params() {
         use_vib=True \
         dynamics_type='diffusion' \
         dynamics.prediction_mode='full' \
-        training.num_epochs=800 \
+        training.num_epochs=2600 \
         training.num_critic_epochs=600 \
         dynamics.dynamics_max_epochs=350 \
-        dataloader.batch_size=${BATCH_SIZE} \
-        val_dataloader.batch_size=${VAL_BATCH_SIZE} \
+        dataloader.batch_size=512 \
+        val_dataloader.batch_size=512 \
         ppo.enable_ratio_logging=true \
         ppo.ratio_log_every_updates=10 \
         ppo.ratio_plot_on_final_flush=true \
         optimizer.lr=2e-4 \
         critic.q_lr=2e-4 \
         critic.v_lr=2e-4 \
-        dynamics.dynamics_lr=4.4e-4 \
+        dynamics.dynamics_lr=3.0e-4 \
         encoder_type='resnet' \
         encoders.resnet.share_rgb_model=False \
         encoders.resnet.rgb_model.weights='r3m' \

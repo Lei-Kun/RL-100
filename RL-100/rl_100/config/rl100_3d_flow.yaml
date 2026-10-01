@@ -371,7 +371,7 @@ unio4:
   use_ema_eval: false
   idql_eval: True
   eval_times: 1
-  finetune_batch_size: 512
+  finetune_batch_size: 128
   final_reward: True
 
 dynamics:
